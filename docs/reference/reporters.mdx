@@ -297,6 +297,7 @@ number, `seq`, and an ISO timestamp, `at`.
 type RunEventFact =
   | { type: 'run-started'; runId; projectId; projectRoot; artifactsRoot; ci; targets; agents?; model?; judge? }
   | { type: 'plan'; total; files: { file; target; tests }[] }
+  | { type: 'plan-updated'; total; files: { file; target; tests }[] }
   | { type: 'notice'; target; message }
   | { type: 'output'; target; pair; stream: 'stdout' | 'stderr'; text }
   | { type: 'setup'; step: SetupStep; state: 'started' }
@@ -313,6 +314,7 @@ type RunEventFact =
 ```
 
 - `run-started` comes first and `run-finished` last.
+- In a dynamic run, `plan-updated` reports the running totals and per-file counts after a job is accepted, without resetting the clock the first `plan` started.
 - `judge` on `run-started` is the run agent's judge model, present only when
   judgments use a model other than `model`.
 - `output` is one write a test made to stdout or stderr; `pair` names the

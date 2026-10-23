@@ -76,7 +76,7 @@ beforeEach(() => {
   runMock.mockReset();
   runMock.mockResolvedValue({ exitCode: 0, report: sampleReport() });
   listMock.mockReset();
-  listMock.mockResolvedValue({ pairs: [] });
+  listMock.mockResolvedValue({ projectRoot: '/project', pairs: [] });
   initMock.mockReset();
   initMock.mockResolvedValue(initOutcome(0));
   watchMock.mockReset();
@@ -454,7 +454,7 @@ describe('e2e list', () => {
   }
 
   it('prints one line per pair and exits 0 without running', async () => {
-    listMock.mockResolvedValue({ pairs });
+    listMock.mockResolvedValue({ projectRoot: '/project', pairs });
     await invoke('list');
     expect(runMock).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(0);
@@ -479,11 +479,11 @@ describe('e2e list', () => {
     expect(stderr.endsWith('(add --help for usage)\n')).toBe(true);
   });
 
-  it('prints { pairs } with --reporter json', async () => {
-    listMock.mockResolvedValue({ pairs });
+  it('prints { projectRoot, pairs } with --reporter json', async () => {
+    listMock.mockResolvedValue({ projectRoot: '/project', pairs });
     await invoke('list', '--reporter', 'json');
     expect(process.exitCode).toBe(0);
-    const printed = { pairs: pairs.filter((pair) => pair.disposition !== 'filtered') };
+    const printed = { projectRoot: '/project', pairs: pairs.filter((pair) => pair.disposition !== 'filtered') };
     expect(JSON.parse(written(stdoutSpy))).toEqual(JSON.parse(JSON.stringify(printed)));
     expect(written(stdoutSpy)).not.toContain('skipReason');
   });

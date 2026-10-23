@@ -8,8 +8,10 @@ icon: "plug"
 
 `e2e mcp` lets coding agents such as Claude Code and Cursor inspect your app,
 try locators, and take masked screenshots before writing tests. It runs over
-stdio and uses the project's configured engine. For setup and what to ask
-the agent, see the [MCP server guide](/mcp-server).
+stdio and uses the project's configured engine. `--http` serves the same app
+tools plus the [script tools](#script-tools) and [job tools](#job-tools) over
+Streamable HTTP, one MCP session per authenticated client. For setup and what
+to ask the agent, see the [MCP server guide](/mcp-server).
 
 ```json title=".mcp.json"
 {
@@ -28,15 +30,15 @@ tool catalog reloads from the config whenever a session opens.
 
 <CodeGroup>
 ```bash npm
-npx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
+npx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>] [--max-sessions-per-domain <n>]
 ```
 
 ```bash pnpm
-pnpm exec e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
+pnpm exec e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>] [--max-sessions-per-domain <n>]
 ```
 
 ```bash bun
-bunx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
+bunx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>] [--max-sessions-per-domain <n>]
 ```
 </CodeGroup>
 
@@ -45,7 +47,20 @@ bunx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
 | [`--config <path>`](#config) | discovered like `e2e run` |
 | [`--target <name>`](#target) | the only target |
 | [`--headed`](#headed) | headless |
-| [`--max-sessions <n>`](#max-sessions) | `4` |
+| [`--max-sessions <n>`](#max-sessions) | `4` (stdio) |
+| [`--max-sessions-per-domain <n>`](#max-sessions-per-domain) | `20` (HTTP) |
+| [`--http`](#http-mode) | stdio |
+| [`--host <host>`](#http-mode) | `127.0.0.1` |
+| [`--port <port>`](#http-mode) | `3001` |
+| [`--path <path>`](#http-mode) | `/mcp/e2e` |
+| [`--allow-host <host>`](#http-mode) | the loopback names for the bound port |
+| [`--allow-origin <origin>`](#http-mode) | the loopback origins for the bound port |
+| [`--trusted-proxy <address>`](#http-mode) | none |
+| [`--session-ttl <seconds>`](#http-mode) | `600` |
+| [`--max-body <bytes>`](#http-mode) | `4194304` |
+| [`--max-workers <n>`](#job-tools) | `4` |
+| [`--max-runs <n>`](#job-tools) | `2` |
+| [`--test-root <path>`](#script-tools) | the working directory |
 
 #### `--config`
 
@@ -68,11 +83,29 @@ session whose `open_session` does not set `headed`.
 
 #### `--max-sessions`
 
-How many sessions may be open at once, 1 through 16. See
+How many native sessions may be open at once over stdio, 1 through 16. Each
+session is its own browser or device. See
 [Several sessions](#several-sessions).
 
 ```bash
 e2e mcp --max-sessions 8 # default: 4
+```
+
+The flag does not apply with `--http`, which has no global session limit;
+passing both is refused at startup. Use
+[`--max-sessions-per-domain`](#max-sessions-per-domain) there instead.
+
+#### `--max-sessions-per-domain`
+
+With `--http`: how many sessions one principal may hold on one target domain,
+1 through 100, shared by every token of that principal. A session counts from
+a successful `open_session` until it closes that session or the session ends.
+Opening another target past the limit reclaims the group's least recently
+active session: its HTTP session is closed and the new one proceeds. A target
+without an app URL, such as a device target, is keyed by its target name.
+
+```bash
+e2e mcp --http --max-sessions-per-domain 20 # default: 20
 ```
 
 ### Tools
@@ -93,7 +126,8 @@ Loads the config, starts the target's app command, boots the engine, starts
 one attempt, and opens the app: its URL when the engine can navigate, or on a
 device the [pinned app](/mobile#point-at-your-app), launched fresh. It installs
 no build, so a local device target needs `app.bundleId`. Returns the session
-id, the catalog, and the first observation.
+id, the catalog, and the first observation. Its structured content names the
+`target`, its `platform`, and its `appUrl` (absent for a device target).
 
 ```txt
 open_session {target: "web", headed: true}
@@ -396,8 +430,11 @@ Sessions enforce what tests enforce:
 
 ## Several sessions
 
-Several sessions can be open at once, up to `--max-sessions`, each on its
-own attempt and its own browser or device. Parallel agents, such as a
+Several sessions can be open at once, each on its own attempt and its own
+browser or device. Over stdio, `--max-sessions` bounds them. Over `--http`
+there is no global limit: each principal gets `--max-sessions-per-domain`
+sessions per target domain, where the domain is the target's app URL host (or
+its target name for a target without one). Parallel agents, such as a
 coding agent's subagents, share one server this way: each opens a session
 and passes its id to every `tools`, `call`, and `close_session`.
 [Bug bashes](/bug-bash) use this: every verifying subagent drives its own
@@ -432,6 +469,218 @@ session.
 - On mobile, each session needs its own simulator or emulator: declare one
   target per device, each naming its `device`, and open each session on its
   own target.
+
+## HTTP mode
+
+`--http` serves Streamable HTTP instead of stdio:
+
+<CodeGroup>
+```bash npm
+E2E_HTTP_MCP_TOKENS='[{"token":"<at least 32 characters>","principal":"alice"}]' npx e2e mcp --http --port 3001
+```
+
+```bash pnpm
+E2E_HTTP_MCP_TOKENS='[{"token":"<at least 32 characters>","principal":"alice"}]' pnpm exec e2e mcp --http --port 3001
+```
+
+```bash bun
+E2E_HTTP_MCP_TOKENS='[{"token":"<at least 32 characters>","principal":"alice"}]' bunx e2e mcp --http --port 3001
+```
+</CodeGroup>
+
+The endpoint is `http://127.0.0.1:3001/mcp/e2e`. `--port 0` asks the OS for a
+free port, and the listening URL is printed to stderr.
+
+### Tokens
+
+`E2E_HTTP_MCP_TOKENS` is a JSON array; each entry is
+`{ "token", "principal", "tools" }`.
+
+| Field | Required | Does |
+| --- | --- | --- |
+| `token` | yes | The Bearer token, at least 32 characters. |
+| `principal` | no | The session and job owner, `"default"` when absent. Required when `tools` includes a job tool, since jobs are private to their principal. A session id is usable only by the token that opened it. |
+| `tools` | no | Which tools the token may call: `open_session`, `tools`, `call`, `close_session`, `list_test_scripts`, `get_test_script`, `save_test_script`, `run_test`, `get_test_status`, `get_test_report`. Absent means the four native tools plus `list_test_scripts` and `get_test_script`; saving a script and running jobs are granted only by naming them. |
+
+Every request to the MCP endpoint needs `Authorization: Bearer <token>`. A
+missing or unknown token is `401`, and it creates no session. Tokens are read
+once at startup. They are not passed to the per-session child, which runs
+project code.
+
+### Script tools
+
+Three tools let an HTTP client work on the project's test files. A token may
+call them only when its `tools` lists them.
+
+| Tool | Does |
+| --- | --- |
+| `list_test_scripts` | Collects the project and groups the tests by file, with paths relative to `--test-root`. Arguments: `prefix`, `keyword`, `limit`. |
+| `get_test_script` | Returns one file's `path` and `content`. |
+| `save_test_script` | Writes one file atomically. Arguments: `path`, `content`, `overwrite`. |
+
+Every path resolves under `--test-root`, the working directory by default,
+resolved once at startup; a root that is not a readable directory fails the
+command before it listens. A path must name a `.e2e.ts` file. A path that
+leaves the root is `POLICY_DENIED`. Links are resolved and the result must
+stay under the root, and a path whose final component is a file symbolic link
+is refused. An absolute path is compared as written, so pass the canonical
+spelling of the root or a relative path. Directories are not created: a
+missing parent is `SCRIPT_NOT_FOUND`.
+
+- `list_test_scripts` collects through a child process, because collection
+  executes each test file's top-level code. The child has a 30-second deadline
+  and its output is drained but never returned. A failing import or collection
+  error is `COLLECTION_ERROR`, naming the exit status only: the child's stderr
+  belongs to project code, and a test or config that prints a secret would put
+  it in the tool result. Run collection locally for the error text. The
+  collection covers the whole project, as a run does; only files under
+  `--test-root` are listed.
+- `save_test_script` writes at most 256 KiB through a temporary file in the
+  same directory and a rename, so a reader sees the old file or the new one,
+  never half of one. It refuses an existing file unless `overwrite` is true
+  (`SCRIPT_EXISTS`).
+- Saves are serialized. A save that lands while
+  `list_test_scripts` is collecting fails that call with `SCRIPT_CHANGED`;
+  call `list_test_scripts` again, so a listing never reports a half-changed
+  project.
+- A token that grants only script tools never starts a native `e2e mcp` child
+  and has no guide resources.
+
+### Job tools
+
+Three tools run test files asynchronously, so an agent can queue a batch and
+keep working. A token may call them only when its `tools` lists them.
+
+| Tool | Does |
+| --- | --- |
+| `run_test` | Queues one to fifty project-relative test files on one target and returns the job at once. Arguments: `targetId`, `testFiles`, `idempotencyKey`. |
+| `get_test_status` | One job's `status`, `counts`, timestamps, and `error`. Argument: `jobId`. |
+| `get_test_report` | The status plus per-test `results`: title, project-relative file, status, duration, attempts, bounded failure evidence, and artifact kinds. Argument: `jobId`. A result never carries an absolute path, though an `error.message` may quote one the Runner reported. |
+
+`run_test` returns once the temporary Runner has started; collection and the
+tests continue after the call. A job is `queued` while its record is written,
+then `collecting`, `waiting_auth`, `running`, and finally one of `passed`,
+`failed`, `timed_out`, `interrupted`, `infrastructure_error`, or `rejected`.
+Submissions for one target join its current run; a run with no work seals after
+two seconds, and the next submission starts a new one once the sealed child
+has exited, so one target never runs two logins beside each other. Each run
+executes its authentication setup once and every later job reuses that
+snapshot. A repeated
+file in the same run gets its own result: the Runner's `repeat` index makes the
+two results distinct, so each job reports only its own. A run waits at most two
+minutes for its authentication setup. One job has fifteen minutes from
+`run_test`, collection included, and at most 1000 selected tests; a selection
+over that is `rejected` with `INVALID_ARGUMENT`. A job that times out stops a
+run it has to itself; one still draining ten seconds later is killed, so a
+stuck test does not keep the slot. A timed-out job beside live neighbours
+stops only itself, since killing the run would cut them too.
+
+A run-level hook failure applies to every job the run completed: a failing
+`afterAll`, for example, turns a job that already reported `passed` into
+`failed` with `HOOK_FAILED`.
+
+`--max-workers` (default 4, 1 to 64, `--http` only) caps how many workers one
+run may start: a project whose `workers` is higher still starts no more than
+the cap, while a lower project value stays lower. Workers start only for
+queued work. `--max-runs` (default 2, 1 to 16, `--http` only) bounds runs alive
+at once; a submission for another target past it is refused with
+`CAPACITY_EXCEEDED` until one run ends. One run also holds at most 20 unfinished
+jobs, refused the same way. A run has thirty minutes in total; jobs it still
+holds at that point end `timed_out` with `RUN_TIMEOUT`.
+
+The run, its authentication, and the two capacity limits are shared by every
+job on one target, whichever principal submitted it. A principal only decides
+who may read a job, not what it executes beside: a job that times out during
+collection stops the shared run, so its neighbours end `rejected`,
+`interrupted`, or `infrastructure_error` rather than waiting for a collection
+that will never resume.
+
+Jobs are addressable by `jobId` across sessions and connections, so a client
+that disconnects can reconnect with the same token and keep polling. A job
+belongs to the principal that submitted it: another principal gets
+`POLICY_DENIED`, and an unknown id is `INVALID_ARGUMENT`. For one principal,
+the same `idempotencyKey` with the same target and files returns the original
+job; the same key with a different request is `INVALID_ARGUMENT`.
+
+A job record is written to `.e2e/http-jobs/<jobId>.json` before the Runner
+hears about it, and each run writes under `.e2e/http-jobs/runs/<random-id>/`
+(not the `runId`), which the gateway removes when that run stops. Run one gateway per project: two would
+share those directories and race over the same job records. On POSIX the
+record is mode `0600`; Windows applies the project directory's ACL instead. A
+link in that path fails the gateway at startup rather than writing outside the
+project. The gateway loads the records at startup and marks one a previous
+gateway left unfinished as `interrupted`; a job whose Runner exited without
+reporting an outcome ends `infrastructure_error` with `WORKER_EXIT`. Nothing is
+replayed: a test with side effects never runs twice because its status was
+lost. A finished record stays readable for 14 days and is then removed, its
+idempotency key with it. A report carries at most 50 results and 256 KiB.
+
+On SIGINT or SIGTERM the gateway seals every run, waits for its child within
+the stop grace, then kills what is left; the jobs it cut end `interrupted`,
+including a submission the child had not accepted yet. Each run's
+authentication snapshot lives under its own run directory and is never reused
+by a later run.
+
+A token that grants only job tools never starts a native `e2e mcp` child and
+has no guide resources.
+
+### Security
+
+- Host and Origin are checked before the token. The defaults accept only
+  `127.0.0.1`, `localhost`, and `::1` with the bound port; there is no
+  wildcard. An absent Origin is allowed, since non-browser clients send none.
+  `--allow-host` and `--allow-origin` replace the defaults; an Origin of
+  `null` or a malformed one is refused.
+- `--trusted-proxy` names a proxy address whose `X-Forwarded-For` is believed
+  for the log line. It changes nothing about authentication: the Bearer token
+  is always the identity.
+- A session id bound to another token is `403` and an unknown id is `404`.
+  There is no global session cap: each target a session opens joins its
+  principal's quota for that target domain
+  ([`--max-sessions-per-domain`](#max-sessions-per-domain)). A session that
+  closes keeps its slot until its child exits; a reclaimed session frees it
+  for the session that triggered the reclaim.
+- `--max-body` bounds the request body. A larger one is `413`.
+- Each MCP session gets its own `e2e mcp` child, spawned on the first native
+  tool or resource call and reused for the rest of the session. A session that
+  never calls one spawns no child, and a token with no native tool never does.
+  The child is limited to one native session, so a client cannot open a second
+  browser in one HTTP session.
+- The script tools are confined to `--test-root`. They never follow a link out
+  of it, never create directories, and never write a path that is not a
+  `.e2e.ts` file. Their collection child runs with the gateway's environment,
+  minus `E2E_HTTP_MCP_TOKENS`.
+- A job belongs to its HTTP principal, not to code running in the project. The
+  Runner child executes the project's test and config code with the runner's
+  full authority: that code can read `.e2e/http-jobs` and forge messages on the
+  job channel, and on the same user it can read the gateway's environment
+  (`/proc/<pid>/environ`) and so every token. `principal` and `tools` separate
+  clients functionally, not the project from its own gateway: clients that do
+  not trust each other need their own user, project, and gateway.
+- `/healthz` is the gateway's own route, so `--path /healthz` is refused at
+  startup.
+- A session closes when the client sends `DELETE`, when `--session-ttl` runs
+  out with no request or open stream, when its child exits, or on shutdown.
+  `--session-ttl 0` disables the idle timeout. A client that only closes its
+  socket leaves the session to the TTL, because HTTP keeps no connection to
+  watch.
+- Nothing here terminates TLS. Run it behind a TLS proxy when clients are not
+  on the same machine, and add that proxy's Host and Origin values.
+
+### Health
+
+`GET /healthz` answers `{"status":"ok","version","sessions","uptimeMs"}`
+without a token and without session details. It shares the Host and Origin
+checks.
+
+### Responses
+
+| Status | When |
+| --- | --- |
+| `401` | Missing or unknown Bearer token. |
+| `403` | Refused Host or Origin, or a session id owned by another token (or another principal). |
+| `404` | Unknown path or session id. |
+| `413` | Request body over `--max-body`. |
 
 ## Resources
 

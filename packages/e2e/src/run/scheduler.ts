@@ -12,7 +12,7 @@ import type { SkipInfo, TestTargetPair } from '../collect/select.ts';
 import type { ResolvedTarget } from '../config/resolve.ts';
 import type { AiTraceSnapshot } from '../internal/ai-trace.ts';
 import type { DebugSnapshot } from '../internal/debug.ts';
-import { InfrastructureError, type SerializedError, TestError, TestTimeoutError, serializeError } from '../internal/errors.ts';
+import { InfrastructureError, type SerializedError, TestError, TestTimeoutError, classifyError, serializeError } from '../internal/errors.ts';
 import { timestamp, uuidv7 } from '../internal/ids.ts';
 import type { AttemptRecord, ResultRecord, RunError, SerialGroupRecord } from './records.ts';
 import { retryVerdict } from './retry.ts';
@@ -78,6 +78,8 @@ export interface SchedulerEvents {
 export interface RunUnitsOptions {
   /** Per-target work, built once by the runner; see `buildWorkPlans`. */
   readonly plans: readonly TargetWorkPlan[];
+  /** 动态输入持续追加计划，输入结束后才允许调度器排空退出。 */
+  readonly additions?: AsyncIterable<readonly TargetWorkPlan[]>;
   /** Maximum workers alive at once across all targets. */
   readonly workers: number;
   /** Failures (failed or timed out results) after which the run stops dispatching and interrupts its workers. */
@@ -359,6 +361,7 @@ class Scheduler {
   private stopSkip: SkipInfo | undefined;
   /** The workers alive when the first one died of an interrupt signal before it was ready; see `excusedSignal`. */
   private signalledWave: Set<SchedulerWorker> | undefined;
+  private inputClosed = false;
 
   constructor(private readonly options: RunUnitsOptions) {}
 
@@ -422,7 +425,35 @@ class Scheduler {
     }
   }
 
+  /** 同一目标的新增任务保留已有认证失败状态和容量。 */
+  private append(plans: readonly TargetWorkPlan[]): void {
+    for (const plan of plans) {
+      const state = this.targets.get(plan.target.name);
+      if (state === undefined) throw new InfrastructureError('WORKER_PROTOCOL', '动态提交不能新增目标');
+      state.setupQueue.push(...plan.setupUnits);
+      state.fileQueue.push(...plan.fileUnits);
+      for (const pair of plan.immediate) this.report(nonRunResult(pair));
+      if (state.failed) this.skipQueues(state, WORKER_START_FAILED);
+      else if (this.interrupting) this.skipQueues(state, this.stopSkip ?? INTERRUPTED_BEFORE_START);
+    }
+    this.wakeUp();
+  }
+
+  /** 输入故障进入原生运行错误链，不留下永远等待的调度循环。 */
+  private async receive(): Promise<void> {
+    try {
+      for await (const plans of this.options.additions ?? []) this.append(plans);
+    } catch (cause) {
+      // 中断、失败上限或超时已经决定了运行结局，被拒绝的提交不算运行故障。
+      if (!this.interrupting) this.options.events.onRunAbort({ error: serializeError(classifyError(cause)) });
+    } finally {
+      this.inputClosed = true;
+      this.wakeUp();
+    }
+  }
+
   async run(): Promise<void> {
+    this.inputClosed = this.options.additions === undefined;
     for (const plan of this.options.plans) {
       this.targets.set(plan.target.name, {
         target: plan.target,
@@ -439,6 +470,7 @@ class Scheduler {
       for (const pair of plan.immediate) this.report(nonRunResult(pair));
     }
 
+    if (this.options.additions !== undefined) void this.receive();
     const onInterrupt = (): void => this.wakeUp();
     this.options.interruptSignal.addEventListener('abort', onInterrupt, { once: true });
     this.options.forceSignal.addEventListener('abort', onInterrupt, { once: true });
@@ -516,6 +548,7 @@ class Scheduler {
   }
 
   private isDone(): boolean {
+    if (!this.inputClosed && !this.interrupting) return false;
     for (const state of this.targets.values()) {
       if (state.setupQueue.length > 0 || state.fileQueue.length > 0) return false;
     }

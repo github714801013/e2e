@@ -65,6 +65,7 @@ const GITIGNORE_ENTRIES = [
   '.e2e/summary.md',
   '.e2e/logs/',
   '.e2e/videos/',
+  '.e2e/http-jobs/',
 ];
 
 const RUN_SCRIPT = 'test:e2e';

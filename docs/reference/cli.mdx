@@ -344,19 +344,23 @@ bunx e2e guide setup      # one topic
 
 #### `e2e mcp`
 
-An MCP server on stdio that gives a coding agent a live session on the app.
+An MCP server that gives a coding agent a live session on the app, over stdio
+or, with `--http`, Streamable HTTP.
 
 <CodeGroup>
 ```bash npm
 npx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
+npx e2e mcp --http [--host <host>] [--port <port>] [--path <path>] [--allow-host <host>] [--allow-origin <origin>] [--trusted-proxy <address>] [--session-ttl <seconds>] [--max-sessions-per-domain <n>] [--max-body <bytes>] [--max-workers <n>] [--max-runs <n>] [--test-root <path>]
 ```
 
 ```bash pnpm
 pnpm exec e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
+pnpm exec e2e mcp --http [--host <host>] [--port <port>] [--path <path>] [--allow-host <host>] [--allow-origin <origin>] [--trusted-proxy <address>] [--session-ttl <seconds>] [--max-sessions-per-domain <n>] [--max-body <bytes>] [--max-workers <n>] [--max-runs <n>] [--test-root <path>]
 ```
 
 ```bash bun
 bunx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
+bunx e2e mcp --http [--host <host>] [--port <port>] [--path <path>] [--allow-host <host>] [--allow-origin <origin>] [--trusted-proxy <address>] [--session-ttl <seconds>] [--max-sessions-per-domain <n>] [--max-body <bytes>] [--max-workers <n>] [--max-runs <n>] [--test-root <path>]
 ```
 </CodeGroup>
 
@@ -365,7 +369,20 @@ bunx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
 | `--config <path>` | The config every session loads unless `open_session` names one. Default: the nearest `e2e.config.ts`, `.mts`, `.js`, or `.mjs`. |
 | `--target <name>` | The target every session opens on. Default: the only target, or the one `open_session` names. |
 | `--headed` | Shows the UI in sessions whose `open_session` does not set `headed`, when the engine supports it. |
-| `--max-sessions <n>` | Sessions open at once, each with its own browser or device, 1 through 16. Default: 4. |
+| `--max-sessions <n>` | Native sessions served at once over stdio, each with its own browser or device. 1 through 16. Default: 4. Refused with `--http`. |
+| `--max-sessions-per-domain <n>` | Sessions one principal may hold on one target domain with `--http`, shared by its tokens; opening another reclaims the least recently active. 1 through 100. Default: 20. |
+| `--http` | Serves Streamable HTTP instead of stdio. Needs `E2E_HTTP_MCP_TOKENS`. |
+| `--host <host>` | Interface to bind with `--http`. Default: `127.0.0.1`. |
+| `--port <port>` | Port with `--http`, 0 for a free one. Default: 3001. |
+| `--path <path>` | MCP endpoint with `--http`. Default: `/mcp/e2e`. |
+| `--allow-host <host>` | `Host` to accept with `--http`, comma-separated or repeated. Default: the loopback names for the bound port. |
+| `--allow-origin <origin>` | `Origin` to accept with `--http`, comma-separated or repeated. Default: the loopback origins for the bound port. |
+| `--trusted-proxy <address>` | Proxy address whose `X-Forwarded-For` is believed for the log line, comma-separated or repeated. |
+| `--session-ttl <seconds>` | Closes an idle HTTP session after this long, 0 to disable. Default: 600. |
+| `--max-body <bytes>` | Largest accepted HTTP request body. Default: 4194304. |
+| `--max-workers <n>` | Workers one HTTP job run may start, capping the project's `workers`. 1 to 64, only with `--http`. Default: 4. |
+| `--max-runs <n>` | Test runs the HTTP gateway serves at once. 1 to 16, only with `--http`. Default: 2. |
+| `--test-root <path>` | Directory the HTTP script tools list, read, and save under. Default: the working directory. |
 
 The [MCP server](/reference/mcp) page covers these options in full, plus the
 tools and the session rules.
@@ -893,7 +910,7 @@ bunx e2e list --reporter json
 | Reporter | Writes |
 | --- | --- |
 | `list` | One line per pair in selection order: `file › title [target]`, with the describe path joined by ` › ` (`tests/billing.e2e.ts › checkout › pays [web]`), then each declared tag as `#tag` (`tests/billing.e2e.ts › checkout › pays [web] #smoke #billing`). A skipped test keeps its line, with `(skipped: <reason>)` appended. Setup tests are listed like any other. |
-| `json` | `{ "pairs": [...] }` to stdout. Each pair carries `id`, `file`, `title`, `titlePath`, `kind` (`test` or `setup`), `tags` (the tags the test declares, `[]` when none), `source` when the declaration is known, `session` when the test consumes one, `sessions`, `serialId` when the test is in a serial group, `target`, `agent`, `disposition` (`run` or `skip`), and `reason` when skipped. |
+| `json` | `{ "projectRoot": "<absolute dir>", "pairs": [...] }` to stdout. Every `file` is relative to `projectRoot`. Each pair carries `id`, `file`, `title`, `titlePath`, `kind` (`test` or `setup`), `tags` (the tags the test declares, `[]` when none), `source` when the declaration is known, `session` when the test consumes one, `sessions`, `serialId` when the test is in a serial group, `target`, `agent`, `disposition` (`run` or `skip`), and `reason` when skipped. |
 
 Pairs a filter removed are not listed. [`list` from `e2e/runner`](/reference/runner)
 runs the same selection in process and also returns the removed pairs.

@@ -104,6 +104,12 @@ export type RunEventFact =
       }[];
     }
   | {
+      /** 动态提交后的累计计划，不重新开始运行计时。 */
+      readonly type: 'plan-updated';
+      readonly total: number;
+      readonly files: readonly { readonly file: string; readonly target: string; readonly tests: number }[];
+    }
+  | {
       /**
        * One line of run-level progress outside any test: a first-run
        * download narrating under a `prepare` step, a reused app process

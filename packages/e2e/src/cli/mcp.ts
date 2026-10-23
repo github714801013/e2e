@@ -8,7 +8,8 @@
  */
 
 import { Writable } from 'node:stream';
-import { errorMessage, exitCodeForCategory, classifyError } from '../internal/errors.ts';
+import { ConfigurationError, errorMessage, exitCodeForCategory, classifyError } from '../internal/errors.ts';
+import { SESSION_PER_DOMAIN_BOUNDS } from '../mcp/http/config.ts';
 import { McpOutput } from '../mcp/output.ts';
 import { serveMcp, type ServeOptions } from '../mcp/server.ts';
 import { processSecrets } from '../run/secrecy.ts';
@@ -20,6 +21,26 @@ export interface McpCommandOptions {
   target?: string | undefined;
   headed?: boolean | undefined;
   maxSessions?: number | undefined;
+  /** Sessions one principal may hold on one target domain over HTTP. */
+  maxSessionsPerDomain?: number | undefined;
+  /** Serve Streamable HTTP instead of stdio. */
+  http?: boolean | undefined;
+  host?: string | undefined;
+  /** 0 asks the OS for a free port. */
+  port?: number | undefined;
+  path?: string | undefined;
+  allowHost?: string[] | undefined;
+  allowOrigin?: string[] | undefined;
+  trustedProxy?: string[] | undefined;
+  /** Idle timeout in seconds; 0 keeps idle sessions open. */
+  sessionTtl?: number | undefined;
+  maxBody?: number | undefined;
+  /** Workers one HTTP job run may start; defaults to four. */
+  maxWorkers?: number | undefined;
+  /** Test runs the gateway serves at once; defaults to two. */
+  maxRuns?: number | undefined;
+  /** Directory the script tools resolve paths against; defaults to `cwd`. */
+  testRoot?: string | undefined;
 }
 
 /**
@@ -80,6 +101,7 @@ export function sessionTelemetry(telemetry: Telemetry): NonNullable<ServeOptions
 
 /** Runs the server until the client disconnects or a signal arrives; returns the exit code. */
 export async function mcp(version: string, options: McpCommandOptions, telemetry: Telemetry): Promise<number> {
+  if (options.http === true) return mcpHttp(version, options);
   const { protocol, output } = claimStdio();
   const stop = new AbortController();
   const onSignal = (): void => stop.abort();
@@ -127,3 +149,98 @@ export async function mcp(version: string, options: McpCommandOptions, telemetry
     process.off('uncaughtException', onUncaught);
   }
 }
+
+/**
+ * Serves Streamable HTTP until a signal arrives. Unlike stdio mode the
+ * process owns no protocol stream, so diagnostics stay on stderr and project
+ * code runs in the per-session children, never here.
+ */
+async function mcpHttp(version: string, options: McpCommandOptions): Promise<number> {
+  // Loaded here, not at the top: the HTTP transport pulls in the MCP client
+  // SDK, and `run`, `init`, and every other command would pay for it.
+  const [{ loadHttpMcpTokens, normalizeAddress, httpPath }, { serveHttpMcp }] = await Promise.all([
+    import('../mcp/http/config.ts'),
+    import('../mcp/http/server.ts'),
+  ]);
+  const stop = new AbortController();
+  const onSignal = (): void => stop.abort();
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+  // A log consumer that closed its pipe must not take every session down.
+  process.stderr.on('error', () => undefined);
+  const log = (line: string): void => {
+    process.stderr.write(`e2e mcp: ${line}\n`);
+  };
+  let crashed = false;
+  const onUncaught = (cause: unknown): void => {
+    crashed = true;
+    const text = cause instanceof Error ? (cause.stack ?? errorMessage(cause)) : errorMessage(cause);
+    log(`[error] uncaught: ${processSecrets.redact(text)}`);
+    stop.abort();
+  };
+  process.on('uncaughtException', onUncaught);
+  // Tests shorten the deadlines; the environment is not a supported flag.
+  const runTimeoutMs = Number(process.env['E2E_HTTP_MCP_RUN_TIMEOUT_MS']);
+  const jobTimeoutMs = Number(process.env['E2E_HTTP_MCP_JOB_TIMEOUT_MS']);
+  const authTimeoutMs = Number(process.env['E2E_HTTP_MCP_AUTH_TIMEOUT_MS']);
+  const retentionMs = Number(process.env['E2E_HTTP_MCP_RETENTION_MS']);
+  const startupTimeoutMs = Number(process.env['E2E_HTTP_MCP_STARTUP_TIMEOUT_MS']);
+  try {
+    // The gateway has no global session cap: the per-domain quota bounds the
+    // browsers, and a flag that silently stopped applying would mislead.
+    if (options.maxSessions !== undefined) {
+      throw new ConfigurationError('INVALID_ARGUMENT', '--max-sessions applies to stdio; over --http, use --max-sessions-per-domain');
+    }
+    const handle = await serveHttpMcp({
+      host: options.host ?? '127.0.0.1',
+      port: options.port ?? 3001,
+      path: httpPath(options.path),
+      allowedHosts: options.allowHost,
+      allowedOrigins: options.allowOrigin,
+      trustedProxies: (options.trustedProxy ?? []).map(normalizeAddress),
+      maxSessionsPerDomain: options.maxSessionsPerDomain ?? SESSION_PER_DOMAIN_BOUNDS.default,
+      maxWorkers: options.maxWorkers,
+      maxRuns: options.maxRuns,
+      ...(Number.isSafeInteger(runTimeoutMs) && runTimeoutMs > 0 ? { runTimeoutMs } : {}),
+      ...(Number.isSafeInteger(jobTimeoutMs) && jobTimeoutMs > 0 ? { jobTimeoutMs } : {}),
+      ...(Number.isSafeInteger(authTimeoutMs) && authTimeoutMs > 0 ? { authTimeoutMs } : {}),
+      ...(Number.isSafeInteger(retentionMs) && retentionMs > 0 ? { retentionMs } : {}),
+      ...(Number.isSafeInteger(startupTimeoutMs) && startupTimeoutMs > 0 ? { startupTimeoutMs } : {}),
+      sessionIdleMs: (options.sessionTtl ?? 600) * 1000,
+      maxBodyBytes: options.maxBody ?? 4 * 1024 * 1024,
+      tokens: loadHttpMcpTokens(process.env),
+      testRoot: options.testRoot ?? process.cwd(),
+      cwd: process.cwd(),
+      configPath: options.config,
+      target: options.target,
+      headed: options.headed === true,
+      version,
+      env: process.env,
+      cliEntry: cliEntry(),
+      log,
+      signal: stop.signal,
+    });
+    log(`listening on ${handle.url}`);
+    if (stop.signal.aborted) await handle.close();
+    await handle.closed;
+    return crashed ? 1 : 0;
+  } catch (cause) {
+    const error = classifyError(cause);
+    log(`${error.code}: ${processSecrets.redact(errorMessage(cause))}`);
+    return exitCodeForCategory(error.category);
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    process.off('uncaughtException', onUncaught);
+  }
+}
+
+/** The CLI script this process runs, spawned as each HTTP session's stdio server. */
+function cliEntry(): string {
+  const entry = process.argv[1];
+  if (entry === undefined) {
+    throw new ConfigurationError('INVALID_ARGUMENT', 'e2e mcp --http cannot find the CLI entry to start its sessions');
+  }
+  return entry;
+}
+

@@ -83,6 +83,8 @@ import {
   type ListOptions,
   openHost,
   run,
+  runDynamic,
+  type DynamicRun,
   type RunEventSink,
   type RunOptions,
   type RunResult,
@@ -711,6 +713,20 @@ void run({ tests: {} });
 runResult.config;
 // @ts-expect-error progress callbacks consume RunEvent, not arbitrary strings
 void run({ onEvent: (_event: string) => {} });
+
+/** 动态入口仅支持固定目标和文件配置，提交不能改变并发。 */
+declare const dynamicRun: DynamicRun;
+void (runDynamic({ target: 'web', config: 'e2e.config.ts' }) satisfies DynamicRun);
+void (runDynamic({ target: 'web', maxWorkers: 2 }) satisfies DynamicRun);
+void (dynamicRun.result satisfies Promise<RunResult>);
+void dynamicRun.submit({ jobId: 'one', files: ['tests/a.e2e.ts'] });
+void dynamicRun.seal();
+// @ts-expect-error 动态执行必须指定固定目标
+void runDynamic({});
+// @ts-expect-error 动态执行使用文件配置
+void runDynamic({ target: 'web', config: { targets } });
+// @ts-expect-error 作业不能设置 Worker 上限
+void dynamicRun.submit({ jobId: 'one', files: ['tests/a.e2e.ts'], workers: 2 });
 
 // `e2e/runner` lists a selection in process. `config` is a path or a config value; `grep` is RegExp[].
 void list({

@@ -397,10 +397,12 @@ export interface EnginePrepareInfo {
   readonly app: EngineAppInfo;
   /**
    * The worker slots the run will start for this target, `0` to `slots - 1`:
-   * the run's worker cap, the engine's declared `workers`, and the work units
-   * selected for the target, whichever is smallest; `0` when nothing runs on
-   * it. Provision for exactly these slots (boot that many devices of a pool);
-   * `init` then finds them ready.
+   * a static run uses the run's worker cap, the engine's declared `workers`,
+   * and the work units selected for the target, whichever is smallest; `0`
+   * when nothing runs on it. A dynamic run uses the smaller of the run's cap
+   * and the declared `workers`, because later jobs may add work. Provision for
+   * exactly these slots (boot that many devices of a pool); `init` then finds
+   * them ready.
    */
   readonly slots: number;
   /**

@@ -72,11 +72,12 @@ CI=1 npx e2e run            # the CI defaults, locally
 `--last-failed`, `--shard`, `--pass-with-no-tests`), prints one line per
 test-target pair, `file › title [target] #tag`, skipped pairs ending in
 ` (skipped: <reason>)`, and starts no app, engine, or worker.
-`--reporter json` prints `{ "pairs": [...] }` and names a skip reason `reason`.
+`--reporter json` prints `{ "projectRoot": "<absolute dir>", "pairs": [...] }`
+and names a skip reason `reason`; every `file` is relative to `projectRoot`.
 
-`import { list } from 'e2e/runner'` returns that selection plus the pairs a
-filter removed, positional arguments that matched no file, and the selected
-target names.
+`import { list } from 'e2e/runner'` returns that selection plus `projectRoot`,
+the pairs a filter removed, positional arguments that matched no file, and the
+selected target names.
 
 ```bash
 npx e2e list tests/signup.e2e.ts --tag smoke --reporter json
@@ -88,6 +89,10 @@ project and tests; `onEvent` receives progress and `interruptSignal` cancels
 with teardown. A runtime config uses one in-process worker. Await each run
 before starting the next and close every host first; overlaps reject with
 `RUNNER_BUSY`.
+
+`runDynamic({ target, config? })` starts a run from a file config that keeps accepting jobs.
+`submit({ jobId, files })` returns the job's result ids, `seal()` stops accepting, and `result` waits for cleanup and returns the combined report.
+An authentication setup runs once per run, repeat submissions execute independently, and workers start on demand under the configured cap.
 
 With a `package.json` script `"test:e2e": "e2e run"`, pnpm forwards `--`
 literally: `pnpm test:e2e -- --headed` reaches e2e as `run -- --headed` and

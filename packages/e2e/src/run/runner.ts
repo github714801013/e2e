@@ -11,6 +11,8 @@ import {
   type ResolvedTarget,
 } from '../config/resolve.ts';
 import { collect, collectInMemory, collectSetups, type Collection } from '../collect/collect.ts';
+import { DynamicRunInput, type PendingSubmission } from './dynamic-input.ts';
+import { DynamicPlan, dynamicAdditions } from './dynamic-plan.ts';
 import type { ModuleRegistration } from '../collect/registry.ts';
 import {
   repeatEach,
@@ -28,6 +30,7 @@ import {
   InfrastructureError,
   E2EError,
   errorMessage,
+  isE2EError,
   exitCodeForCategory,
   serializeError,
   type ErrorPhase,
@@ -101,6 +104,11 @@ export interface RunOptions {
   headed?: boolean | undefined;
   retries?: number | undefined;
   workers?: number | undefined;
+  /**
+   * A ceiling on the config's `workers` for one dynamic run (`runDynamic`).
+   * Unlike `workers`, it never raises concurrency above what the project asks.
+   */
+  maxWorkers?: number | undefined;
   /**
    * Stops the run once this many tests have failed (`--max-failures`): the
    * tests running end as interrupted, the rest are skipped with cause
@@ -200,6 +208,8 @@ export interface RunOptions {
    * reporter writes to the terminal past it.
    */
   processOutput?: RunnerOutput | undefined;
+  /** 持续接收同一次 Run 的作业，只供公开动态入口使用。 */
+  dynamicInput?: DynamicRunInput | undefined;
 }
 
 /**
@@ -301,6 +311,12 @@ export interface ListedPair {
 
 /** The selection `list` returns. */
 export interface ListResult {
+  /**
+   * Absolute path of the project root the config resolved. Every pair's `file`
+   * is relative to it, which differs from `cwd` when the config is found above
+   * a subdirectory the caller started in.
+   */
+  readonly projectRoot: string;
   /** One pair per test, target, and agent, in selection order, filtered pairs included. */
   readonly pairs: readonly ListedPair[];
   /** Positional arguments, as written, that selected no discovered file. */
@@ -313,8 +329,9 @@ export interface ListResult {
  * Collects and selects like `e2e list` and stops there: no app process, no
  * engine prepare, no worker. Every pair is returned, filtered ones included,
  * in selection order, one per test, target, and agent; repeats are not
- * expanded. `unmatched` is the positional arguments that selected no file,
- * `targets` the selected target names in config order. An empty selection
+ * expanded. `projectRoot` is where the config resolved and every `file` is
+ * relative to it; `unmatched` is the positional arguments that selected no
+ * file, `targets` the selected target names in config order. An empty selection
  * throws `NO_TESTS` unless `passWithNoTests`. Config, collection, and
  * selection failures throw the same classified error `run` records. Each
  * call imports the test files again, so a later call sees an edit.
@@ -337,6 +354,7 @@ export async function list(options: ListOptions = {}): Promise<ListResult> {
     runOptions.passWithNoTests !== undefined ? { passWithNoTests: runOptions.passWithNoTests } : {},
   );
   return {
+    projectRoot: config.projectRoot,
     pairs: selection.pairs.map((pair) => toListedPair(config.projectRoot, pair)),
     unmatched: collection.unmatchedPositionals,
     targets: selection.perTarget.map((entry) => entry.target.name),
@@ -367,7 +385,7 @@ const FORCE_KILL_MARGIN_MS = 1_000;
 export async function run(options: RunOptions = {}): Promise<RunOutcome> {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
-  const runId = uuidv7();
+  const runId = options.dynamicInput?.runId ?? uuidv7();
   /** The fresh module graph this run's config and test files load in, when `freshGraph` asks for one. */
   const graph = options.freshGraph === true ? `run-${runId}` : undefined;
   /**
@@ -746,6 +764,17 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
       return result;
     };
 
+    const dynamic = options.dynamicInput;
+    const first =
+      dynamic === undefined
+        ? undefined
+        : await withAbort(dynamic.take(), interrupted, () => new InfrastructureError('CANCELLED', 'the dynamic run was interrupted')).catch((cause: unknown) => {
+            // 尚未提交作业时的取消只结束 Run，不算运行故障。
+            if (isE2EError(cause) && cause.code === 'CANCELLED') return undefined;
+            throw cause;
+          });
+    if (dynamic !== undefined && first === undefined) return;
+
     // Collection comes first and starts no process: a collection failure or
     // NO_TESTS is reported before any dev server boots or browser downloads.
     let planned: { collection: Collection; selection: Selection };
@@ -754,7 +783,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
         debug.time('collect', async () => {
           const collection =
             options.tests === undefined
-              ? await collect(config, options.files, graph)
+              ? await collect(config, first?.files ?? options.files, graph)
               : collectInMemory(
                   config.projectRoot,
                   options.tests.file,
@@ -780,10 +809,31 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
         }),
       );
     } catch (cause) {
+      first?.reject(cause);
       recordFailure(cause, 'collection');
       return;
     }
-    const { collection, selection } = planned;
+    const { collection } = planned;
+    const dynamicPlan = dynamic === undefined ? undefined : new DynamicPlan(collection.tests);
+    let selection: Selection;
+    try {
+      selection =
+        dynamicPlan === undefined
+          ? planned.selection
+          : dynamicPlan.append(
+              planned.selection,
+              new Set(collection.files.filter((file) => file.selected).map((file) => file.file)),
+            );
+    } catch (cause) {
+      // The first submission never passes through `dynamicAdditions`, so its
+      // rejection has to be settled here; the run then idles out without work.
+      if (first === undefined) throw cause;
+      first.reject(cause);
+      selection = {
+        pairs: [],
+        perTarget: planned.selection.perTarget.map(({ target }) => ({ target, pairs: [] })),
+      };
+    }
     if (!interrupted.aborted) {
       for (const skipped of collection.uncollected) {
         const why = options.tests === undefined ? 'which no positional selected' : 'collected only for its setup tests';
@@ -804,7 +854,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
 
     // The work units, built once: the same plans tell each engine's `prepare`
     // how many worker slots to provision and the scheduler what to dispatch.
-    let plans = buildWorkPlans(selection, collection, config.projectRoot);
+    let plans = dynamicPlan?.plans(selection, collection, config.projectRoot) ?? buildWorkPlans(selection, collection, config.projectRoot);
     // Workers re-load the config module themselves, so a file-backed config
     // runs across processes. A supplied `rawConfig` cannot cross a process
     // boundary (it may hold live engine handles), and neither can the bodies
@@ -813,7 +863,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     // there is none in either case.
     const workerConfigPath = options.tests === undefined ? config.configPath : undefined;
     const inProcess = workerConfigPath === undefined;
-    const runWorkers = inProcess ? 1 : config.workers;
+    const runWorkers = inProcess ? 1 : Math.min(config.workers, options.maxWorkers ?? config.workers);
     if (runWorkers > 1) {
       const previous = await previousFileDurations(outputLayout(config.output).report);
       plans = longestFirst(plans, (targetName, file) => previous.get(fileDurationKey(targetName, file)));
@@ -833,7 +883,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     // of a worker's stderr fighting the live status block.
     try {
       plans = await debug.time('engine.prepare', () =>
-        prepareEngines(plans, runWorkers, engines, { runId, projectRoot: config.projectRoot, env, signal: interrupted, headed: options.headed ?? false, notice }, emit),
+        prepareEngines(plans, runWorkers, engines, { runId, projectRoot: config.projectRoot, env, signal: interrupted, headed: options.headed ?? false, notice }, emit, dynamic !== undefined),
       );
     } catch (cause) {
       if (!interrupted.aborted) recordFailure(cause, 'launch');
@@ -944,9 +994,31 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
             envFor: workerEnvFor(plans, env),
           });
 
-    await debug.time('scheduler', () =>
+    const append = async (request: PendingSubmission): Promise<readonly TargetWorkPlan[]> => {
+      const stopped = (): boolean => interrupted.aborted || dynamic!.isStopped;
+      if (stopped()) throw new InfrastructureError('CANCELLED', 'the dynamic run was interrupted');
+      const nextCollection = await collect(config, request.files, graph);
+      // 收集中途结束的运行不能再把任务塞进已经停下的调度器。
+      if (stopped()) throw new InfrastructureError('CANCELLED', 'the dynamic run was interrupted');
+      const nextSelection = select(nextCollection, config, { targetIds: targets.map((target) => target.name) });
+      for (const { target, pairs } of nextSelection.perTarget) validateEngine(target, pairs);
+      const submitted = new Set(nextCollection.files.filter((file) => file.selected).map((file) => file.file));
+      const accepted = dynamicPlan!.append(nextSelection, submitted);
+      const additions = dynamicPlan!.plans(accepted, nextCollection, config.projectRoot);
+      const total = dynamicPlan!.selection(selection);
+      emit({ type: 'plan-updated', total: total.pairs.length, files: plannedFiles(total) });
+      dynamicPlan!.accept(request, accepted);
+      return additions;
+    };
+    const stopInput = (): void => dynamic?.stop();
+    interrupted.addEventListener('abort', stopInput, { once: true });
+    if (interrupted.aborted) stopInput();
+    if (first !== undefined) dynamicPlan!.accept(first, selection);
+    try {
+      await debug.time('scheduler', () =>
       runUnits({
         plans,
+        ...(dynamic === undefined ? {} : { additions: dynamicAdditions(dynamic, append) }),
         workers: runWorkers,
         ...(options.maxFailures === undefined ? {} : { maxFailures: options.maxFailures }),
         ...(timeLimit === undefined ? {} : { timeLimit }),
@@ -966,8 +1038,9 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
           },
           onRunError: recordRunError,
           onRunAbort: abortRun,
-          onFailureLimit: stopEarly,
+          onFailureLimit: (failures, limit) => { stopInput(); stopEarly(failures, limit); },
           onTimeLimit: () => {
+            stopInput();
             stoppedEarly = true;
           },
           onTestStart: (start, targetName) =>
@@ -984,6 +1057,10 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
         },
       }),
     );
+    } finally {
+      interrupted.removeEventListener('abort', stopInput);
+      dynamic?.stop();
+    }
   };
 
   // The interrupt bridge is armed for the whole body — app startup, collection,
@@ -1054,6 +1131,7 @@ async function prepareEngines(
   engines: PreparedEngines,
   scope: PrepareScope,
   emit: (fact: RunEventFact) => void,
+  dynamic = false,
 ): Promise<TargetWorkPlan[]> {
   const prepared: TargetWorkPlan[] = [];
   for (const plan of plans) {
@@ -1066,7 +1144,7 @@ async function prepareEngines(
     const step: SetupStep = { kind: 'prepare', target: target.name, engine: engine.name };
     emit({ type: 'setup', step, state: 'started' });
     const startedMs = Date.now();
-    const slots = plannedSlots(plan, runWorkers);
+    const slots = dynamic ? Math.min(runWorkers, target.engine?.workers ?? runWorkers) : plannedSlots(plan, runWorkers);
     const result = await engines.prepare(target, slots, scope);
     prepared.push(withPreparedWorkers(plan, engine.name, slots, result));
     if (!scope.signal.aborted) {

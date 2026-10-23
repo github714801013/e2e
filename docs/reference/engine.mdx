@@ -512,6 +512,10 @@ optional. The `Engine` declaration's JSDoc above states each hook's contract.
 Runs once per target in the runner process, after collection and before
 workers, app commands, and the run's clock start.
 
+A dynamic `runDynamic` run provisions `slots` from the configured cap and the engine's declared cap, so jobs added during the run can scale up.
+Workers still start on demand, and a smaller `workers` cap returned by `prepare` keeps applying.
+A static run still shrinks slots to the initially selected work units.
+
 ```ts
 async prepare(info) {
   if (info.slots === 0) return; // nothing runs on this target
@@ -563,10 +567,12 @@ export interface EnginePrepareInfo {
   readonly app: EngineAppInfo;
   /**
    * The worker slots the run will start for this target, `0` to `slots - 1`:
-   * the run's worker cap, the engine's declared `workers`, and the work units
-   * selected for the target, whichever is smallest; `0` when nothing runs on
-   * it. Provision for exactly these slots (boot that many devices of a pool);
-   * `init` then finds them ready.
+   * a static run uses the run's worker cap, the engine's declared `workers`,
+   * and the work units selected for the target, whichever is smallest; `0`
+   * when nothing runs on it. A dynamic run uses the smaller of the run's cap
+   * and the declared `workers`, because later jobs may add work. Provision for
+   * exactly these slots (boot that many devices of a pool); `init` then finds
+   * them ready.
    */
   readonly slots: number;
   /**

@@ -338,6 +338,7 @@ export class ListReporter implements Reporter {
         this.runStarted(event);
         break;
       case 'plan':
+      case 'plan-updated':
         this.plan(event);
         break;
       case 'notice':
@@ -525,8 +526,8 @@ export class ListReporter implements Reporter {
    * done, so its arrival is when the run starts executing and the clock
    * starts: a browser downloaded moments earlier is not on it.
    */
-  private plan(event: RunEventOf<'plan'>): void {
-    this.startedAt = new Date();
+  private plan(event: RunEventOf<'plan' | 'plan-updated'>): void {
+    if (event.type === 'plan') this.startedAt = new Date();
     for (const planned of event.files) {
       this.group(planned.file, planned.target).planned = planned.tests;
     }

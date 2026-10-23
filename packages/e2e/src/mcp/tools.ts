@@ -45,6 +45,8 @@ export interface McpToolSpec<Shape extends z.ZodRawShape = z.ZodRawShape> {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: z.ZodObject<Shape>;
+  /** When set, the result carries `structuredContent` that matches this schema. */
+  readonly outputSchema?: z.ZodObject<z.ZodRawShape> | undefined;
   /** Hint for clients: a tool that changes nothing on the app or disk. */
   readonly readOnly: boolean;
   /** Runs the tool on validated arguments; a thrown error becomes an error result. */

@@ -72,6 +72,16 @@ export interface OpenSessionOptions {
   readonly headed?: boolean | undefined;
 }
 
+/** What an open returns: the text a client reads and the target the HTTP gateway counts. */
+interface OpenedSession {
+  /** The opening text: the summary, the catalog, and the first screen. */
+  readonly text: string;
+  readonly target: string;
+  readonly platform: string;
+  /** The target's app URL; a device target has none, and the gateway keys on the target name. */
+  readonly appUrl?: string | undefined;
+}
+
 export interface SessionHostOptions {
   /** The absolute path of the config a session loads, without evaluating it; `configPath` overrides the server's default. */
   readonly locateConfig: (configPath: string | undefined) => string;
@@ -125,10 +135,11 @@ export class SessionHost {
 
   /**
    * Opens a session and returns its opening text: the summary, the catalog,
-   * and the first screen. `signal` is the request's: a client that cancels
-   * it, or disconnects, aborts the open and what it started.
+   * and the first screen, plus the target it landed on, which `open_session`
+   * reports. `signal` is the request's: a client that cancels it, or
+   * disconnects, aborts the open and what it started.
    */
-  open(options: OpenSessionOptions, signal?: AbortSignal): Promise<string> {
+  open(options: OpenSessionOptions, signal?: AbortSignal): Promise<OpenedSession> {
     const headed = options.headed ?? this.options.headed;
     const usage = new SessionUsage(this.sessions.liveCount, headed);
     return this.sessions.admit((id) => this.openSession(id, options, headed, usage, signal)).catch((cause: unknown) => {
@@ -230,7 +241,7 @@ export class SessionHost {
     headed: boolean,
     usage: SessionUsage,
     request: AbortSignal | undefined,
-  ): Promise<string> {
+  ): Promise<OpenedSession> {
     // The catalog renders synchronously, so the optional SDK is loaded once
     // here when installed. Without it the catalog reads the tools' Standard
     // Schemas, and only a model-backed call needs the package.
@@ -334,7 +345,13 @@ export class SessionHost {
       // A step that ends on its own (the TTL, a hard stop) ends the session.
       void step.done.then((outcome) => this.endOnItsOwn(live, outcome.error === undefined ? 'the session step concluded' : errorMessage(outcome.error), 'step'));
       this.touch(live);
-      return text;
+      const base = live.target.app.base?.href;
+      return {
+        text,
+        target: live.target.name,
+        platform: live.target.platform,
+        ...(base === undefined ? {} : { appUrl: base }),
+      };
     } catch (cause) {
       opening.removeEventListener('abort', cancel);
       await this.closeAttempt(attempt, abort, async () => {
@@ -481,8 +498,23 @@ export class SessionHost {
           .optional()
           .describe('Show the browser or simulator, when the engine supports it; pass true when the user wants to watch. Default: headless, unless the server was started with --headed'),
       }).strict(),
+      outputSchema: z.object({
+        target: z.string().describe('The target the session opened'),
+        platform: z.string().describe('The target platform, such as web, ios, or android'),
+        appUrl: z.string().optional().describe("The target's app URL; absent for a device target"),
+      }).strict(),
       readOnly: false,
-      call: async (args, extra) => textResult(await this.open(args, extra.signal)),
+      call: async (args, extra) => {
+        const opened = await this.open(args, extra.signal);
+        return {
+          content: [{ type: 'text', text: opened.text }],
+          structuredContent: {
+            target: opened.target,
+            platform: opened.platform,
+            ...(opened.appUrl === undefined ? {} : { appUrl: opened.appUrl }),
+          },
+        };
+      },
     });
   }
 
@@ -544,7 +576,22 @@ function redacting(spec: McpToolSpec): McpToolSpec {
       } catch (cause) {
         result = errorResult(cause);
       }
-      return redactResult(result, (text) => processSecrets.redact(text));
+      const redact = (text: string): string => processSecrets.redact(text);
+      const redacted = redactResult(result, redact);
+      // Structured content reaches the client as model input too, and the
+      // gateway logs fields of it; a secret in an app URL must not slip past
+      // the text redaction.
+      return redacted.structuredContent === undefined
+        ? redacted
+        : { ...redacted, structuredContent: redactValues(redacted.structuredContent, redact) };
     },
   };
+}
+
+/** Every string inside a JSON value through `redact`; objects and arrays keep their shape. */
+function redactValues(value: unknown, redact: (text: string) => string): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map((item) => redactValues(item, redact));
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValues(item, redact)]));
 }

@@ -39,6 +39,7 @@ console.log(result.status, result.report.run.summary);
 | Function | Returns |
 | --- | --- |
 | [`run`](#run) | `Promise<RunResult>` |
+| [`runDynamic`](#rundynamic) | `DynamicRun` |
 | [`list`](#list) | `Promise<ListResult>` |
 | [`openHost`](#openhost) | `Promise<E2EHost<Fixtures>>` |
 | [`isE2EError`](#ise2eerror) | `boolean` |
@@ -98,6 +99,32 @@ and errors in the report.
   Your application's logs and progress callback output stay under your
   control.
 
+#### `runDynamic`
+
+`runDynamic({ cwd?, config?, target, maxWorkers?, output?, onEvent?, interruptSignal? })` starts a run that keeps accepting jobs.
+`config` accepts a file path only, `target` pins one configured target, and the worker cap comes from that config.
+`maxWorkers` lowers that cap for this run and never raises it: a project asking for more workers yields to it, a project asking for fewer keeps its own number.
+`output` places the run's report and results there instead of the project's `.e2e`.
+
+```ts
+import { runDynamic } from 'e2e/runner';
+
+const active = runDynamic({ target: 'web' });
+const first = await active.submit({ jobId: 'first', files: ['tests/a.e2e.ts'] });
+const second = await active.submit({ jobId: 'second', files: ['tests/b.e2e.ts'] });
+await active.seal();
+const result = await active.result;
+```
+
+- `submit` collects, validates, and queues the files, then returns `{ accepted: true, resultIds, setupIds }`; `resultIds` cover that job's tests only, and `setupIds` name the shared setups the submission introduced, which the job waits for.
+- `jobId` is unique within the run. Submitting the same file again executes it independently, with the report's `repeat` separating results and evidence. A job id stays reserved after submission: a rejected follow-up job retries with a new id, and a first submission that fails to collect ends the run with that error.
+- An authentication setup runs once per target. Later jobs may use only the setups established by the first accepted submission; they cannot introduce or replace authentication. Editing a setup file during the run does not run it again; start a new run to change authentication.
+- An empty queue keeps the run open. `seal()` irreversibly stops accepting submissions, and work already queued still runs.
+- `result` waits for every accepted test, worker, session snapshot, and app process to finish cleanup, then returns the complete `RunResult`.
+- The dynamic run owns the process until `result` settles; another `run` or host returns `RUNNER_BUSY` in the meantime.
+- The engine's first `prepare` provisions the smaller of the configured cap (after `maxWorkers`) and the engine's declared cap, so workers can start on demand during the run. An engine backed by hosted devices may reserve more resources up front.
+- Each submission collects the project again, so test files' top-level code runs once per submission. Dynamic collection has the runner's OS authority, as in a normal run.
+
 #### `list`
 
 `list(options?: ListOptions)` collects and selects the way
@@ -153,8 +180,11 @@ process sees an edit.
 
 ##### Result
 
-`ListResult` is `{ pairs, unmatched, targets }`.
+`ListResult` is `{ projectRoot, pairs, unmatched, targets }`.
 
+- `projectRoot` is the absolute directory the config resolved to. Every
+  pair's `file` is relative to it, which differs from the `cwd` you passed
+  when the config was found above it.
 - `pairs` is one `ListedPair` per test, target, and agent, in selection
   order, including pairs a filter removed. Repeats are not expanded.
 - `unmatched` is the positional arguments, as written, that selected no
@@ -454,6 +484,7 @@ The one-shot attempt `e2e mcp` uses stays internal. There is no top-level
 | Type | Describes |
 | --- | --- |
 | `RunOptions`, `RunResult` | [`run`](#run)'s options and result |
+| `DynamicRunOptions`, `DynamicRun`, `DynamicSubmitOptions`, `DynamicSubmission` | [`runDynamic`](#rundynamic)'s options, live handle, submission input, and receipt |
 | `RunEventSink` | The `onEvent` callback |
 | `ListOptions`, `ListResult`, `ListedPair` | [`list`](#list)'s options, result, and one pair |
 | `OpenHostOptions`, `E2EHost` | [`openHost`](#openhost)'s options and the [host](#host) |

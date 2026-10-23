@@ -1,0 +1,30 @@
+name: e2e-http-mcp
+
+services:
+  gateway:
+    image: ${E2E_IMAGE:?请先执行构建与部署脚本}
+    init: true
+    user: "1000:1000"
+    restart: unless-stopped
+    stop_grace_period: 150s
+    ports:
+      - "10.1.14.158:18091:3001"
+    env_file:
+      - .secrets.env
+    volumes:
+      - ./tests:/app/tests
+      - ./state:/app/.e2e
+      - ./targets:/run/e2e-targets:ro
+    shm_size: "1gb"
+    cpus: 4
+    mem_limit: 8g
+    pids_limit: 512
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

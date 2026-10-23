@@ -1,0 +1,43 @@
+; e2e HTTP MCP gateway, non-root systemd unit for WSL2.
+; Adjust ExecStart, WorkingDirectory, and EnvironmentFile to the real install.
+; The credentials file belongs to root, mode 0600: systemd reads it before it
+; drops to User=, and the project's own code never needs it.
+
+[Unit]
+Description=e2e HTTP MCP gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=e2e
+Group=e2e
+UMask=0077
+WorkingDirectory=/srv/e2e-project
+EnvironmentFile=/etc/e2e/http-mcp.env
+; Browsers are installed once by root, outside the service sandbox.
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+ExecStart=/usr/bin/node /srv/e2e-project/node_modules/e2e/dist/cli/bin.js mcp --http --host 127.0.0.1 --port 3001 --max-workers 4 --max-runs 2
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=150
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+; Hides other users' processes; a process of the same user stays visible.
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/srv/e2e-project
+ReadOnlyPaths=-/opt/ms-playwright
+MemoryMax=4G
+CPUQuota=200%
+TasksMax=512
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

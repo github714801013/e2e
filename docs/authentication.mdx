@@ -85,6 +85,9 @@ calls `app.open()` first.
 A session lasts one run. The runner encrypts it with a key held only in
 memory and deletes it at cleanup. See [Sessions](/reference/security#sessions).
 
+In a dynamic `runDynamic` run, later jobs reuse the snapshot saved by the same setup, while each test still opens its own context.
+A failed shared setup skips the tests that depend on it instead of signing in again or overwriting the run's snapshots.
+
 ## Credentials
 
 Declare each account in config. Read the password from the environment:
