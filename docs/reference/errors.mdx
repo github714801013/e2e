@@ -142,7 +142,7 @@ These appear in terminal output and in the report as plain string codes.
 | `SESSION_OPEN` | `e2e mcp`: `open_session` while every session slot (`--max-sessions`, default 4) holds an open, opening, or closing session, or while the server shuts down. Close one first | configuration | 2 |
 | `UNKNOWN_TOPIC` | `e2e mcp`: an `e2e://guide/{topic}` resource named a topic the skill does not have. The message lists them | configuration | 2 |
 | `UNKNOWN_TOOL` | `e2e mcp`: `call` or `tools` named a tool the session's catalog does not have. The message lists the catalog. An action verb the engine does not declare is `UNSUPPORTED_CAPABILITY` instead | configuration | 2 |
-| `SCRIPT_NOT_FOUND` | `e2e mcp --http`: `get_test_script` or `save_test_script` named a script, or a parent directory, that does not exist under the test root | configuration | 2 |
+| `SCRIPT_NOT_FOUND` | `e2e mcp --http`: `get_test_script` named a script, or a parent directory, that does not exist under the test root | configuration | 2 |
 | `SCRIPT_EXISTS` | `e2e mcp --http`: `save_test_script` named an existing file without `overwrite: true` | configuration | 2 |
 | `SCRIPT_CHANGED` | `e2e mcp --http`: a `save_test_script` landed while `list_test_scripts` was collecting. Retry the list | infrastructure | 3 |
 | `SCRIPT_IO_FAILED` | `e2e mcp --http`: reading, resolving, or atomically replacing a test script failed at the file system | infrastructure | 3 |

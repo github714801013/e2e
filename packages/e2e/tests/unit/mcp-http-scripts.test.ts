@@ -101,6 +101,8 @@ describe('ScriptService path safety', () => {
     expect(escaped.code).toBe('POLICY_DENIED');
     const absolute = await rejection(scripts.getScript(path.join(outside, 'secret.e2e.ts')));
     expect(absolute.code).toBe('POLICY_DENIED');
+    const saved = await rejection(scripts.saveScript('../' + path.basename(outside) + '/new.e2e.ts', 'x', false));
+    expect(saved.code).toBe('POLICY_DENIED');
   });
 
   it('refuses anything that is not an .e2e.ts file', async () => {
@@ -128,16 +130,23 @@ describe('ScriptService path safety', () => {
 
     const error = await rejection(scripts.getScript('linked/escape.e2e.ts'));
     expect(error.code).toBe('POLICY_DENIED');
+    // A save under the link would have to create the missing directory there.
+    const nested = await rejection(scripts.saveScript('linked/new/sub.e2e.ts', 'x', false));
+    expect(nested.code).toBe('POLICY_DENIED');
+    expect(existsSync(path.join(outside, 'new'))).toBe(false);
   });
 });
 
 describe('ScriptService get and save', () => {
-  it('reports a missing script and a missing parent as SCRIPT_NOT_FOUND', async () => {
+  it('reports a missing script, and creates missing parents on save', async () => {
     const dir = root();
     const scripts = await service(dir);
 
     expect((await rejection(scripts.getScript('tests/absent.e2e.ts'))).code).toBe('SCRIPT_NOT_FOUND');
-    expect((await rejection(scripts.saveScript('no-dir/new.e2e.ts', 'x', false))).code).toBe('SCRIPT_NOT_FOUND');
+
+    const created = await scripts.saveScript('no-dir/deeper/new.e2e.ts', 'x', false);
+    expect(created).toEqual({ path: 'no-dir/deeper/new.e2e.ts', bytes: 1, created: true });
+    expect(readFileSync(path.join(dir, 'no-dir', 'deeper', 'new.e2e.ts'), 'utf8')).toBe('x');
   });
 
   it('creates a script, then refuses to replace it without overwrite', async () => {

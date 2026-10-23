@@ -211,6 +211,15 @@ test('added passes', async () => {
         'tests/added.e2e.ts',
       ]);
 
+      const nested = await invoke(client, 'save_test_script', { path: 'tests/nested/deeper/added.e2e.ts', content });
+      expect(nested.isError, nested.text).toBe(false);
+      expect(JSON.parse(nested.text)).toEqual({ path: 'tests/nested/deeper/added.e2e.ts', bytes: Buffer.byteLength(content), created: true });
+      expect(readFileSync(path.join(project.dir, 'tests', 'nested', 'deeper', 'added.e2e.ts'), 'utf8')).toBe(content);
+      const nestedList = await invoke(client, 'list_test_scripts', { prefix: 'tests/nested' });
+      expect((JSON.parse(nestedList.text) as { scripts: { path: string }[] }).scripts.map((script) => script.path)).toEqual([
+        'tests/nested/deeper/added.e2e.ts',
+      ]);
+
       const exists = await invoke(client, 'save_test_script', { path: 'tests/added.e2e.ts', content });
       expect(exists.isError).toBe(true);
       expect(exists.text).toContain('SCRIPT_EXISTS');

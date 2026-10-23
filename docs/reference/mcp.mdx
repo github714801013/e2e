@@ -524,8 +524,9 @@ command before it listens. A path must name a `.e2e.ts` file. A path that
 leaves the root is `POLICY_DENIED`. Links are resolved and the result must
 stay under the root, and a path whose final component is a file symbolic link
 is refused. An absolute path is compared as written, so pass the canonical
-spelling of the root or a relative path. Directories are not created: a
-missing parent is `SCRIPT_NOT_FOUND`.
+spelling of the root or a relative path. A save creates missing parent
+directories under the root; a read whose parent is missing is
+`SCRIPT_NOT_FOUND`.
 
 - `list_test_scripts` collects through a child process, because collection
   executes each test file's top-level code. The child has a 30-second deadline

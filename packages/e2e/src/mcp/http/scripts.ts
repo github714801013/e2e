@@ -8,7 +8,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Tool } from '@modelcontextprotocol/server';
 import { ConfigurationError, errorMessage, InfrastructureError, isE2EError } from '../../internal/errors.ts';
@@ -110,7 +110,7 @@ const GET_SCHEMA: Tool = {
 const SAVE_SCHEMA: Tool = {
   name: 'save_test_script',
   description:
-    'Atomically write one test script under the configured test root. Refuses a path outside the root, a name not ending in .e2e.ts, and an existing file unless overwrite is true.',
+    'Atomically write one test script under the configured test root, creating missing parent directories. Refuses a path outside the root, a name not ending in .e2e.ts, and an existing file unless overwrite is true.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -271,7 +271,7 @@ export class ScriptService {
     // The lock is taken before the first await so two saves issued in one turn
     // queue in call order; resolving first would let the second jump ahead.
     return this.runSave(async () => {
-      const target = await this.resolve(input);
+      const target = await this.resolve(input, true);
       const existing = await lstat(target.absolute).catch((cause: unknown) => {
         if (isMissing(cause)) return undefined;
         throw scriptIo('save_test_script', cause);
@@ -298,8 +298,11 @@ export class ScriptService {
     });
   }
 
-  /** Resolves a client path once: the parent, the root, and the real target. */
-  private async resolve(input: string): Promise<ResolvedScript> {
+  /**
+   * Resolves a client path once: the parent, the root, and the real target.
+   * A save creates missing parent directories; a read reports them missing.
+   */
+  private async resolve(input: string, createParents = false): Promise<ResolvedScript> {
     if (input.length === 0 || input.length > MAX_PATH_CHARS || hasControl(input)) {
       throw invalid('the path must be a non-empty path without control characters');
     }
@@ -315,8 +318,12 @@ export class ScriptService {
     try {
       parent = await realpath(path.dirname(absolute));
     } catch (cause) {
-      if (isMissing(cause)) throw new ConfigurationError('SCRIPT_NOT_FOUND', `the parent directory of ${JSON.stringify(input)} does not exist`);
-      throw scriptIo('resolve the path', cause);
+      if (!isMissing(cause)) throw scriptIo('resolve the path', cause);
+      if (!createParents) throw new ConfigurationError('SCRIPT_NOT_FOUND', `the parent directory of ${JSON.stringify(input)} does not exist`);
+      await this.createParentDirectories(input, absolute);
+      parent = await realpath(path.dirname(absolute)).catch((failure: unknown) => {
+        throw scriptIo('resolve the path', failure);
+      });
     }
     // Only a link can move an in-root lexical path out; this is the check for it.
     if (!inside(this.root, parent)) throw policy(`${JSON.stringify(input)} resolves outside the test root`);
@@ -330,6 +337,34 @@ export class ScriptService {
       if (!isMissing(cause)) throw scriptIo('resolve the path', cause);
     }
     return { absolute: target, relative: relativeTo(this.root, target) };
+  }
+
+  /**
+   * Creates a save path's missing directories, but only after the deepest
+   * existing ancestor is proven to stay under the root. `mkdir` creates no
+   * links itself, and the caller re-resolves the parent afterwards.
+   */
+  private async createParentDirectories(input: string, absolute: string): Promise<void> {
+    let ancestor = path.dirname(absolute);
+    for (;;) {
+      try {
+        const real = await realpath(ancestor);
+        if (!inside(this.root, real)) throw policy(`${JSON.stringify(input)} resolves outside the test root`);
+        break;
+      } catch (cause) {
+        if (isE2EError(cause)) throw cause;
+        if (!isMissing(cause)) throw scriptIo('resolve the path', cause);
+        const parent = path.dirname(ancestor);
+        // The root exists, so the walk always stops there first.
+        if (parent === ancestor) throw scriptIo('resolve the path', cause);
+        ancestor = parent;
+      }
+    }
+    try {
+      await mkdir(path.dirname(absolute), { recursive: true, mode: 0o755 });
+    } catch (cause) {
+      throw scriptIo('save_test_script', cause);
+    }
   }
 
   /** Collects through the built CLI, bounded in time and output. */
