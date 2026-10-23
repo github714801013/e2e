@@ -416,6 +416,9 @@ Sessions enforce what tests enforce:
 - A secret fills only through `type_secret`. Once one has been filled,
   [`screenshot`](#screenshot) and the [point tools](#point-tools) stay in the
   catalog but answer `PIXEL_TAINTED` for the rest of the session.
+- A secret whose name starts with `<target>.` belongs to that target. The
+  session's opening text names the target it is on; a secret for another
+  target is still listed but is not this session's.
 - Once the config has loaded, its secret values are redacted from every text
   a tool returns, a node `locate` found, an action's result, an
   `open_session` or `close_session` failure, a cleanup line, and the server's

@@ -37,7 +37,7 @@ console.log('config loaded');
 export default {
   targets,
   credentials: { admin: { username: 'admin', password: 'admin-pass' } },
-  secrets: { apiKey: 'sk-live-SUPERSECRET-0000' },
+  secrets: { apiKey: 'sk-live-SUPERSECRET-0000', 'web.secondary-password': 'secondary-Pa55' },
 } satisfies E2EConfig;
 `;
 
@@ -399,6 +399,7 @@ describe('e2e mcp', { timeout: 120_000 }, () => {
     const opened = await invoke('open_session');
     expect(opened.isError, opened.text).toBe(false);
     expect(opened.text).toContain('Secrets: "apiKey"');
+    expect(opened.text).toContain('Secrets whose names start with "web." belong to this target.');
 
     // A generic secret fills any editable input, so the engine projects the
     // value the way it does for every non-secure field.

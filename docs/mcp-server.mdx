@@ -105,7 +105,9 @@ target.
 ## Secrets
 
 `type_secret` fills a secret without showing it to the agent. After a
-secret is filled, the session stops returning screenshots.
+secret is filled, the session stops returning screenshots. A secret whose
+name starts with `<target>.` belongs to that target; the session's opening
+text names the target it is on.
 
 <Warning>
 Videos from `start_recording` are not masked.

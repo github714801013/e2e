@@ -439,6 +439,9 @@ export class SessionHost {
     if (config.secrets.size > 0) {
       lines.push(`Secrets: ${[...config.secrets.keys()].map((name) => `"${name}"`).join(', ')}. Fill one into any input with type_secret and its name; you never see the value.`);
     }
+    if ([...config.secrets.keys()].some((name) => name.startsWith(`${live.target.name}.`))) {
+      lines.push(`Secrets whose names start with "${live.target.name}." belong to this target.`);
+    }
     lines.push(
       `Pass session "${live.id}" to every tools, call, and close_session; with several sessions open, a call without it fails.`,
     );

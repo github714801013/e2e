@@ -45,7 +45,7 @@ function validateTargets(file) {
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new Error(`第 ${index + 1} 项必须是对象`);
     const keys = Object.keys(entry);
     for (const key of keys) {
-      if (!['name', 'url', 'username', 'password'].includes(key)) throw new Error(`第 ${index + 1} 项包含未知字段 ${key}`);
+      if (!['name', 'url', 'username', 'password', 'secondaryPassword'].includes(key)) throw new Error(`第 ${index + 1} 项包含未知字段 ${key}`);
     }
     if (typeof entry.name !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(entry.name)) throw new Error(`第 ${index + 1} 项 name 无效`);
     if (entry.name === 'demo' || names.has(entry.name)) throw new Error(`第 ${index + 1} 项 name 重复或占用了 demo`);
@@ -60,6 +60,7 @@ function validateTargets(file) {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`第 ${index + 1} 项只支持 http 或 https`);
     if (typeof entry.username !== 'string' || entry.username.trim() === '') throw new Error(`第 ${index + 1} 项 username 为空`);
     if (typeof entry.password !== 'string' || [...entry.password].length < 6) throw new Error(`第 ${index + 1} 项 password 少于 6 个字符`);
+    if (entry.secondaryPassword !== undefined && (typeof entry.secondaryPassword !== 'string' || [...entry.secondaryPassword].length < 6)) throw new Error(`第 ${index + 1} 项 secondaryPassword 少于 6 个字符`);
   });
 }
 

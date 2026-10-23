@@ -153,6 +153,10 @@ Once a secret is filled in the session, `screenshot` and the point tools
 `writing-tests`). Before the session's first `screenshot`, a point tool only
 says to take one.
 
+A secret whose name starts with `<target>.` belongs to that target; the
+session's opening text names the target it is on, so use the prefix that
+matches it when several targets are configured.
+
 Resources: `e2e://guide` and `e2e://guide/<topic>` hold this skill.
 
 ## Workflow
