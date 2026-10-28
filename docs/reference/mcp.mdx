@@ -503,7 +503,7 @@ free port, and the listening URL is printed to stderr.
 | --- | --- | --- |
 | `token` | yes | The Bearer token, at least 32 characters. |
 | `principal` | no | The session and job owner, `"default"` when absent. Required when `tools` includes a job tool, since jobs are private to their principal. A session id is usable only by the token that opened it. |
-| `tools` | no | Which tools the token may call: `open_session`, `tools`, `call`, `close_session`, `list_test_scripts`, `get_test_script`, `save_test_script`, `run_test`, `get_test_status`, `get_test_report`. Absent means the four native tools plus `list_test_scripts` and `get_test_script`; saving a script and running jobs are granted only by naming them. |
+| `tools` | no | Which tools the token may call: `open_session`, `tools`, `call`, `close_session`, `list_test_scripts`, `get_test_script`, `save_test_script`, `run_test`, `get_test_status`, `get_test_report`, `list_test_artifacts`. Absent means the four native tools plus `list_test_scripts` and `get_test_script`; saving a script, running jobs, and downloading artifacts are granted only by naming them. |
 
 Every request to the MCP endpoint needs `Authorization: Bearer <token>`. A
 missing or unknown token is `401`, and it creates no session. Tokens are read
@@ -552,7 +552,7 @@ directories under the root; a read whose parent is missing is
 
 ### Job tools
 
-Three tools run test files asynchronously, so an agent can queue a batch and
+Four tools run test files asynchronously, so an agent can queue a batch and
 keep working. A token may call them only when its `tools` lists them.
 
 | Tool | Does |
@@ -560,6 +560,7 @@ keep working. A token may call them only when its `tools` lists them.
 | `run_test` | Queues one to fifty project-relative test files on one target and returns the job at once. Arguments: `targetId`, `testFiles`, `idempotencyKey`. |
 | `get_test_status` | One job's `status`, `counts`, timestamps, and `error`. Argument: `jobId`. |
 | `get_test_report` | The status plus per-test `results`: title, project-relative file, status, duration, attempts, bounded failure evidence, and artifact kinds. Argument: `jobId`. A result never carries an absolute path, though an `error.message` may quote one the Runner reported. |
+| `list_test_artifacts` | The artifacts a finished job kept, each with its kind, media type, redaction, size, and an authenticated `downloadUrl` for a local file (or the provider `url` for a hosted video). Argument: `jobId`. While `ready` is false the run has not ended yet; poll again. |
 
 `run_test` returns once the temporary Runner has started; collection and the
 tests continue after the call. A job is `queued` while its record is written,
@@ -617,7 +618,33 @@ gateway left unfinished as `interrupted`; a job whose Runner exited without
 reporting an outcome ends `infrastructure_error` with `WORKER_EXIT`. Nothing is
 replayed: a test with side effects never runs twice because its status was
 lost. A finished record stays readable for 14 days and is then removed, its
-idempotency key with it. A report carries at most 50 results and 256 KiB.
+idempotency key and artifacts with it. A report carries at most 50 results and
+256 KiB.
+
+A job keeps the artifacts its report names (screenshots, videos, downloads,
+and logs), so a client can take the bytes away. Just before the run directory
+is removed, the gateway copies each local file to
+`.e2e/http-jobs/artifacts/<jobId>/` and writes an index at
+`.e2e/http-jobs/artifacts/<jobId>.json`. A file over 256 MiB is skipped, and so
+is one that would take the job past 1 GiB; a missing file, a path that leaves
+the run, a failed copy, and an artifact only a store `ref` names are listed
+with their reason instead. A skipped or failed copy never changes the job's
+status. `list_test_artifacts` returns at most 200 descriptors and sets
+`truncated` past that; a copied file past the first 200 has no listing entry,
+so its URL is not discoverable from the tool. Once `ready` is true the listing
+is final: `error: "report_unavailable"` means the run left no readable report,
+and `error: "artifacts_unavailable"` means the job's files were never kept,
+such as after a gateway restart before the run ended. Polling again changes
+neither.
+
+Each local artifact's `downloadUrl` is `GET <MCP path>/artifacts/<jobId>/<index>`
+on the same gateway, with the same Bearer token. The token must carry
+`list_test_artifacts` and the job must belong to its principal; an unknown job,
+another principal's job, and a missing index all answer `404`. The response is
+the stored bytes with the artifact's media type, `Content-Length`, an
+`attachment` disposition, `X-Content-Type-Options: nosniff`, and
+`Cache-Control: private, no-store`. A hosted video keeps its provider `url`
+and is not proxied by the gateway.
 
 On SIGINT or SIGTERM the gateway seals every run, waits for its child within
 the stop grace, then kills what is left; the jobs it cut end `interrupted`,

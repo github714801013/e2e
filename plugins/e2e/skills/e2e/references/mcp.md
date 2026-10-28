@@ -81,13 +81,15 @@ directories). Paths stay under `--test-root` (default the working directory)
 and must name `.e2e.ts` files.
 `list_test_scripts` and `get_test_script` are in the default set;
 `save_test_script` must be named. A failed collection reports the exit status
-only: the child's stderr is project output and is never returned. Three job tools, also granted by name, run
+only: the child's stderr is project output and is never returned. Four job tools, also granted by name, run
 files asynchronously: `run_test` queues one to fifty project-relative test
 files on a target and returns a `jobId` at once, `get_test_status` reports
-its state and counts, and `get_test_report` returns the per-test results and
-bounded failure evidence. A job belongs to the submitting principal, so a
-token granted a job tool must name one, and outlives the connection that
-queued it. That check only gates reading: every job on one target shares the
+its state and counts, `get_test_report` returns the per-test results and
+bounded failure evidence, and `list_test_artifacts` lists what a finished job
+kept, with an authenticated `downloadUrl` for each local file (poll it while
+`ready` is false, since the copy lands after the run ends). A job belongs to
+the submitting principal, so a token granted a job tool must name one, and
+outlives the connection that queued it. That check only gates reading: every job on one target shares the
 run, its authentication, and the capacity limits below. It is not a tenant
 boundary: project code runs as the gateway's user and can read its
 environment, so clients that do not trust each other need separate users,
@@ -105,8 +107,17 @@ next run, so one target never runs two logins. A run-level hook failure such
 as a failing `afterAll` also fails jobs that already reported `passed`. A
 Runner that crashes or loses its IPC channel marks its unfinished jobs
 `infrastructure_error`; a gateway restart marks them `interrupted`. Neither
-replays a test. Finished job records stay readable for 14 days, and a stopped
-run's output directory is removed. Run one gateway per project. Host and Origin are checked against
+replays a test. Finished job records stay readable for 14 days, and before a
+stopped run's output directory is removed its artifacts are copied to
+`.e2e/http-jobs/artifacts/<jobId>/` with an index beside them (at most 256 MiB
+per file and 1 GiB per job; a larger file is skipped and listed with its
+reason). `list_test_artifacts` returns at most 200 descriptors and sets
+`truncated` past that; a file past the first 200 has no listing entry. Once
+`ready` is true the listing is final, with `error` naming why nothing was kept.
+Each `downloadUrl` is a `GET` on the same gateway with
+the same Bearer token, which must carry `list_test_artifacts`; another
+principal's job and an unknown one both answer `404`. Run one gateway per
+project. Host and Origin are checked against
 loopback by default; `--allow-host`, `--allow-origin`, `--max-body`, and
 `--session-ttl` adjust that boundary. `GET /healthz` reports status and
 session count without a token, and `--path /healthz` is refused at startup.

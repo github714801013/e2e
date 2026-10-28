@@ -1,7 +1,8 @@
 /**
- * The three job tools the gateway serves itself: queue test files, then poll
- * the job and read its report. Every argument object is closed; a field the
- * schema does not name is refused before it reaches the job store.
+ * The four job tools the gateway serves itself: queue test files, then poll
+ * the job, read its report, and list its artifacts. Every argument object is
+ * closed; a field the schema does not name is refused before it reaches the
+ * job store.
  */
 
 import type { Tool } from '@modelcontextprotocol/server';
@@ -70,8 +71,28 @@ const GET_TEST_REPORT_SCHEMA: Tool = {
   annotations: { readOnlyHint: true },
 };
 
-/** The three job tools, in the order a client lists them. */
-export const JOB_TOOL_DEFINITIONS: readonly Tool[] = [RUN_TEST_SCHEMA, GET_TEST_STATUS_SCHEMA, GET_TEST_REPORT_SCHEMA];
+const LIST_TEST_ARTIFACTS_SCHEMA: Tool = {
+  name: 'list_test_artifacts',
+  description:
+    'List the artifacts a finished job kept, with an authenticated download URL for each local file. Poll it while ready is false: a job\'s artifacts appear after its run ends. Once ready is true the listing is final, including its error, if any. Argument: jobId.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      jobId: { type: 'string', maxLength: MAX_KEY_CHARS, description: 'The job id run_test returned.' },
+    },
+    required: ['jobId'],
+    additionalProperties: false,
+  },
+  annotations: { readOnlyHint: true },
+};
+
+/** The four job tools, in the order a client lists them. */
+export const JOB_TOOL_DEFINITIONS: readonly Tool[] = [
+  RUN_TEST_SCHEMA,
+  GET_TEST_STATUS_SCHEMA,
+  GET_TEST_REPORT_SCHEMA,
+  LIST_TEST_ARTIFACTS_SCHEMA,
+];
 
 /** Runs one job tool; a thrown classified error becomes its error result. */
 export async function callJobTool(
@@ -79,6 +100,7 @@ export async function callJobTool(
   token: HttpMcpToken,
   name: string,
   args: unknown,
+  baseUrl: string,
 ): Promise<McpToolResult> {
   switch (name) {
     case 'run_test':
@@ -87,6 +109,8 @@ export async function callJobTool(
       return textResult(JSON.stringify(jobs.status(token, parseJobId(args, name)), null, 2));
     case 'get_test_report':
       return textResult(JSON.stringify(jobs.report(token, parseJobId(args, name)), null, 2));
+    case 'list_test_artifacts':
+      return textResult(JSON.stringify(await jobs.artifacts(token, parseJobId(args, name), baseUrl), null, 2));
     default:
       throw new ConfigurationError('INVALID_ARGUMENT', `"${name}" is not a job tool`);
   }

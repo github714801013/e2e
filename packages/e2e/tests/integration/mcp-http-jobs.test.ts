@@ -1,8 +1,8 @@
 /**
- * `run_test`, `get_test_status`, and `get_test_report` through the built HTTP
- * gateway: a real MCP client submits files, a forked Runner child collects
- * and runs them on the fixture app, and the job outlives the request that
- * queued it, including the client connection.
+ * `run_test`, `get_test_status`, `get_test_report`, and `list_test_artifacts`
+ * through the built HTTP gateway: a real MCP client submits files, a forked
+ * Runner child collects and runs them on the fixture app, and the job outlives
+ * the request that queued it, including the client connection.
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -15,8 +15,9 @@ import { createProject, type FixtureProject } from '../helpers/run-project.ts';
 
 const TOKEN_A = 'job-token-alpha-0123456789abcdef';
 const TOKEN_B = 'job-token-bravo-0123456789abcdef';
+const TOKEN_C = 'job-token-charlie-0123456789abcdef';
 
-const JOB_TOOLS = ['run_test', 'get_test_status', 'get_test_report'];
+const JOB_TOOLS = ['run_test', 'get_test_status', 'get_test_report', 'list_test_artifacts'];
 
 const TERMINAL = new Set(['passed', 'failed', 'timed_out', 'interrupted', 'infrastructure_error', 'rejected']);
 
@@ -48,6 +49,28 @@ interface JobReport extends JobStatus {
   readonly truncated: boolean;
 }
 
+interface JobArtifact {
+  readonly artifactId: string;
+  readonly kind: string;
+  readonly mediaType: string;
+  readonly redaction: string;
+  readonly resultId: string;
+  readonly attempt: number;
+  readonly fileName: string;
+  readonly size?: number;
+  readonly downloadUrl?: string;
+  readonly url?: string;
+  readonly unavailable?: string;
+}
+
+interface ArtifactListing {
+  readonly jobId: string;
+  readonly ready: boolean;
+  readonly artifacts: readonly JobArtifact[];
+  readonly truncated: boolean;
+  readonly error?: string;
+}
+
 async function jobStatus(client: Client, jobId: string): Promise<JobStatus> {
   const result = await invoke(client, 'get_test_status', { jobId });
   if (result.isError) throw new Error(`get_test_status failed: ${result.text}`);
@@ -58,6 +81,12 @@ async function jobReport(client: Client, jobId: string): Promise<JobReport> {
   const result = await invoke(client, 'get_test_report', { jobId });
   if (result.isError) throw new Error(`get_test_report failed: ${result.text}`);
   return JSON.parse(result.text) as JobReport;
+}
+
+async function artifactListing(client: Client, jobId: string): Promise<ArtifactListing> {
+  const result = await invoke(client, 'list_test_artifacts', { jobId });
+  if (result.isError) throw new Error(`list_test_artifacts failed: ${result.text}`);
+  return JSON.parse(result.text) as ArtifactListing;
 }
 
 /** Polls until the job leaves its active states; returns the terminal status. */
@@ -120,6 +149,12 @@ test('needs broken', { session: 'broken' }, async () => {});
 test('quick passes', async ({ app, screen }) => {
   await app.open('/storage');
   await expect(screen.getByRole('status', { name: 'Marker' })).toHaveText('empty');
+});
+`,
+      'tests/shot.e2e.ts': `import { expect, test } from 'e2e';
+test('takes a screenshot', { session: 'tester' }, async ({ app }) => {
+  await app.open('/storage');
+  expect(await app.screenshot()).toContain('screenshots/');
 });
 `,
       'tests/slow.e2e.ts': `import { test } from 'e2e';
@@ -231,6 +266,96 @@ test('slow runs past the stop grace', async () => {
       await alpha.transport.terminateSession().catch(() => undefined);
       await alpha.client.close().catch(() => undefined);
       await gateway.close();
+    }
+  });
+
+  it('keeps a finished job\'s artifacts and streams a screenshot to its principal', async () => {
+    const gateway = await startGateway(project, app, [
+      { token: TOKEN_A, principal: 'alpha', tools: JOB_TOOLS },
+      { token: TOKEN_B, principal: 'bravo', tools: JOB_TOOLS },
+      { token: TOKEN_C, principal: 'charlie', tools: ['get_test_status', 'get_test_report'] },
+    ]);
+    const alpha = await connectHttp(gateway.url, TOKEN_A);
+    let listing!: ArtifactListing;
+    let screenshot!: JobArtifact;
+    let bytes!: Buffer;
+    let submitted!: JobStatus;
+    try {
+      submitted = JSON.parse(
+        (await runTest(alpha.client, { targetId: 'web', testFiles: ['tests/shot.e2e.ts'] })).text,
+      ) as JobStatus;
+      expect((await waitForTerminal(alpha.client, submitted.jobId)).status).toBe('passed');
+
+      // The Runner writes the report when the run ends; its artifacts land in
+      // the job store just after, so a finished job can be briefly not-ready.
+      await expect
+        .poll(
+          async () => {
+            const result = await invoke(alpha.client, 'list_test_artifacts', { jobId: submitted.jobId });
+            if (result.isError) return false;
+            listing = JSON.parse(result.text) as ArtifactListing;
+            return listing.ready && listing.artifacts.some((artifact) => artifact.downloadUrl !== undefined);
+          },
+          { timeout: 120_000, interval: 500 },
+        )
+        .toBe(true);
+
+      screenshot = listing.artifacts.find(
+        (artifact) => artifact.kind === 'screenshot' && artifact.downloadUrl !== undefined,
+      )!;
+      expect(screenshot).toMatchObject({ mediaType: 'image/png', redaction: 'complete', attempt: 1 });
+      expect(screenshot.fileName).toMatch(/\.png$/);
+      // The listing names no path on disk, only the job store's URL.
+      expect(JSON.stringify(listing)).not.toContain(project.dir);
+      expect(JSON.stringify(listing)).not.toContain(path.join('.e2e', 'http-jobs'));
+
+      const download = (token?: string): Promise<Response> =>
+        fetch(screenshot.downloadUrl!, {
+          headers: token === undefined ? {} : { authorization: `Bearer ${token}` },
+        });
+
+      const response = await download(TOKEN_A);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('image/png');
+      expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(response.headers.get('cache-control')).toBe('private, no-store');
+      expect(response.headers.get('content-disposition')).toContain('attachment');
+      bytes = Buffer.from(await response.arrayBuffer());
+      expect(bytes.byteLength).toBeGreaterThan(8);
+      expect(bytes.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+
+      // The route is Bearer-authenticated, checks the job's principal, and
+      // needs the listing grant, not just any job tool.
+      expect((await download()).status).toBe(401);
+      expect((await download(TOKEN_C)).status).toBe(403);
+      expect((await download(TOKEN_B)).status).toBe(404);
+      const beyond = screenshot.downloadUrl!.replace(/\/\d+$/, '/9999');
+      expect((await fetch(beyond, { headers: { authorization: `Bearer ${TOKEN_A}` } })).status).toBe(404);
+
+      // The copy outlives the run output that produced it.
+      const kept = path.join(project.dir, '.e2e', 'http-jobs', 'artifacts', submitted.jobId);
+      expect(existsSync(kept)).toBe(true);
+      expect(readdirSync(kept).length).toBeGreaterThan(0);
+    } finally {
+      await alpha.transport.terminateSession().catch(() => undefined);
+      await alpha.client.close().catch(() => undefined);
+      await gateway.close();
+    }
+
+    // A restarted gateway reads the index from disk and serves the same bytes.
+    const restarted = await startGateway(project, app, [{ token: TOKEN_A, principal: 'alpha', tools: JOB_TOOLS }]);
+    const again = await connectHttp(restarted.url, TOKEN_A);
+    try {
+      const reloaded = await artifactListing(again.client, submitted.jobId);
+      const kept = reloaded.artifacts.find((artifact) => artifact.kind === 'screenshot' && artifact.downloadUrl !== undefined);
+      expect(kept).toBeTruthy();
+      const response = await fetch(kept!.downloadUrl!, { headers: { authorization: `Bearer ${TOKEN_A}` } });
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+    } finally {
+      await again.transport.terminateSession().catch(() => undefined);
+      await again.client.close().catch(() => undefined);
+      await restarted.close();
     }
   });
 

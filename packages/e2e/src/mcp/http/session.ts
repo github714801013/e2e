@@ -8,6 +8,7 @@
  * gateway itself, because both outlive a single stdio child.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
@@ -45,6 +46,14 @@ export interface SessionHooks {
 interface ChildLink {
   readonly client: Client;
   readonly transport: StdioClientTransport;
+}
+
+/** The gateway URL the request being handled arrived through. */
+const requestBase = new AsyncLocalStorage<string>();
+
+/** Runs one HTTP request with its gateway URL, so a tool result can name it. */
+export function withRequestBaseUrl<T>(baseUrl: string, run: () => T): T {
+  return requestBase.run(baseUrl, run);
 }
 
 /**
@@ -168,7 +177,13 @@ export class HttpSession {
         try {
           // A submitted job keeps running when the request is cancelled: that
           // is what lets a client disconnect and poll by job id afterwards.
-          return await callJobTool(this.jobs, this.token, name, request.params.arguments ?? {});
+          return await callJobTool(
+            this.jobs,
+            this.token,
+            name,
+            request.params.arguments ?? {},
+            requestBase.getStore() ?? '',
+          );
         } catch (cause) {
           return errorResult(cause);
         }

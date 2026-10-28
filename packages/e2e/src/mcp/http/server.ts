@@ -5,8 +5,10 @@
  * created, and a session id is only usable by the principal that opened it.
  */
 
+import { createReadStream } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { ConfigurationError, errorMessage } from '../../internal/errors.ts';
 import { processSecrets } from '../../run/secrecy.ts';
 import {
@@ -18,14 +20,16 @@ import {
   defaultOrigins,
   hostAllowed,
   isJobMcpTool,
+  normalizeAddress,
   originAllowed,
   RUN_TIMEOUT_MS,
   type HttpMcpOptions,
 } from './config.ts';
+import { headerFileName } from './job-artifacts.ts';
 import { JobService } from './jobs.ts';
 import { SessionQuota } from './quota.ts';
 import { ScriptService } from './scripts.ts';
-import { HttpSession, type SessionHooks } from './session.ts';
+import { HttpSession, withRequestBaseUrl, type SessionHooks } from './session.ts';
 
 /** A running gateway; `closed` resolves after a signal or `close()`. */
 export interface HttpMcpHandle {
@@ -193,6 +197,13 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
       });
       return;
     }
+    // `<MCP path>/artifacts/<jobId>/<index>` is the one route beside the MCP
+    // endpoint: a tool returns the URL, and a plain GET streams the bytes.
+    const artifactsPrefix = `${options.path}/artifacts/`;
+    if (pathname.startsWith(artifactsPrefix)) {
+      await serveArtifact(request, response, pathname.slice(artifactsPrefix.length), options, jobs, remote);
+      return;
+    }
     if (pathname !== options.path) {
       sendJson(response, 404, { error: 'not_found' });
       return;
@@ -265,7 +276,10 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
     response.once('close', abort);
     try {
       const web = toWebRequest(request, controller.signal);
-      const answer = await session.transport.handleRequest(web);
+      // A tool that returns a link names the URL the client reached this
+      // gateway through, not the address the socket happens to bind.
+      const baseUrl = `${requestScheme(request, options.trustedProxies)}://${request.headers.host ?? 'localhost'}${options.path}`;
+      const answer = await withRequestBaseUrl(baseUrl, () => session.transport.handleRequest(web));
       await writeResponse(response, answer);
     } finally {
       response.off('close', abort);
@@ -378,6 +392,93 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
 
 function header(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * Streams one stored artifact. Unknown jobs, another principal's job, and a
+ * missing index all answer 404: the route never confirms that a job exists.
+ */
+async function serveArtifact(
+  request: IncomingMessage,
+  response: ServerResponse,
+  route: string,
+  options: HttpMcpOptions,
+  jobs: JobService | undefined,
+  remote: string,
+): Promise<void> {
+  const segments = route.split('/');
+  const jobId = segments.length === 2 ? decodeSegment(segments[0]!) : undefined;
+  const indexText = segments.length === 2 ? segments[1]! : '';
+  const index = /^(?:0|[1-9][0-9]*)$/.test(indexText) ? Number(indexText) : Number.NaN;
+  if (jobId === undefined || !Number.isSafeInteger(index)) {
+    sendJson(response, 404, { error: 'not_found' });
+    return;
+  }
+  if (request.method !== 'GET') {
+    response.setHeader('allow', 'GET');
+    sendJson(response, 405, { error: 'method_not_allowed' });
+    return;
+  }
+  const token = authenticate(request.headers.authorization, options.tokens);
+  if (token === undefined) {
+    options.log(`unauthorized GET ${request.url ?? ''} from ${remote}`);
+    response.setHeader('www-authenticate', 'Bearer realm="e2e mcp"');
+    sendJson(response, 401, { error: 'unauthorized' });
+    return;
+  }
+  if (jobs === undefined) {
+    sendJson(response, 404, { error: 'not_found' });
+    return;
+  }
+  // The listing is the only way to learn a URL, so the same grant gates the
+  // download: another tool's token does not read artifacts by guessing ids.
+  if (!token.tools.includes('list_test_artifacts')) {
+    options.log(`artifact GET refused for principal "${token.principal}" from ${remote}: tool not granted`);
+    sendJson(response, 403, { error: 'forbidden' });
+    return;
+  }
+  const artifact = await jobs.artifactFile(token, jobId, index);
+  if (artifact === undefined) {
+    sendJson(response, 404, { error: 'not_found' });
+    return;
+  }
+  response.statusCode = 200;
+  response.setHeader('content-type', artifact.mediaType);
+  response.setHeader('content-length', String(artifact.size));
+  response.setHeader('content-disposition', contentDisposition(artifact.fileName));
+  response.setHeader('x-content-type-options', 'nosniff');
+  response.setHeader('cache-control', 'private, no-store');
+  try {
+    await pipeline(createReadStream(artifact.path), response);
+  } catch (cause) {
+    // A client that stops mid-download is not a gateway failure.
+    if (!response.destroyed) throw cause;
+  }
+}
+
+/** The scheme a client used: plain http on the socket, or a trusted proxy's forward. */
+function requestScheme(request: IncomingMessage, trusted: readonly string[]): 'http' | 'https' {
+  const forwarded = header(request.headers['x-forwarded-proto']);
+  if (forwarded !== undefined && trusted.includes(normalizeAddress(request.socket.remoteAddress))) {
+    const first = forwarded.split(',')[0]?.trim().toLowerCase();
+    if (first === 'https' || first === 'http') return first;
+  }
+  return 'http';
+}
+
+/** A download name that reaches no header as a delimiter. */
+function contentDisposition(fileName: string): string {
+  const ascii = headerFileName(fileName);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName).replaceAll("'", '%27')}`;
+}
+
+function decodeSegment(value: string): string | undefined {
+  try {
+    const decoded = decodeURIComponent(value);
+    return decoded === '' ? undefined : decoded;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The target an `open_session` result names, from its structured content. */

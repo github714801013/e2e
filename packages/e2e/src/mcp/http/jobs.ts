@@ -31,6 +31,14 @@ import {
   type IpcResult,
 } from '../../run/dynamic-ipc.ts';
 import { childEnvironment, JOB_RETENTION_MS, MAX_QUEUED_JOBS_PER_RUN, type HttpMcpToken } from './config.ts';
+import {
+  listedArtifacts,
+  preserveJobArtifacts,
+  readJobArtifactIndex,
+  readReportArtifacts,
+  type JobArtifactListing,
+  type StoredArtifact,
+} from './job-artifacts.ts';
 
 /** How long a job may wait for the Runner child to become ready. */
 const STARTUP_TIMEOUT_MS = 30_000;
@@ -146,7 +154,7 @@ interface JobServiceOptions {
   readonly log: (line: string) => void;
 }
 
-/** Serves `run_test`, `get_test_status`, and `get_test_report`. */
+/** Serves the four job tools and the artifact download route. */
 export class JobService {
   private readonly records = new Map<string, JobRecord>();
   private readonly idempotent = new Map<string, string>();
@@ -160,6 +168,10 @@ export class JobService {
   private readonly dirty = new Set<string>();
   private readonly jobsDir: string;
   private readonly runsDir: string;
+  private readonly artifactsDir: string;
+  /** Jobs whose run ended and whose artifact copy has not settled yet. */
+  private readonly pendingArtifacts = new Set<string>();
+  private readonly preservations = new Set<Promise<void>>();
   /** Read by a run's channel when it arms a job's timers. */
   readonly jobTimeoutMs: number;
   readonly authTimeoutMs: number;
@@ -168,9 +180,10 @@ export class JobService {
   private sweeper: NodeJS.Timeout | undefined;
   private closing = false;
 
-  private constructor(private readonly options: JobServiceOptions, dirs: { jobs: string; runs: string }) {
+  private constructor(private readonly options: JobServiceOptions, dirs: { jobs: string; runs: string; artifacts: string }) {
     this.jobsDir = dirs.jobs;
     this.runsDir = dirs.runs;
+    this.artifactsDir = dirs.artifacts;
     this.jobTimeoutMs = options.jobTimeoutMs ?? JOB_TIMEOUT_MS;
     this.authTimeoutMs = options.authTimeoutMs ?? AUTH_TIMEOUT_MS;
     this.startupTimeoutMs = options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS;
@@ -181,9 +194,11 @@ export class JobService {
     const root = await realpath(options.cwd);
     const jobs = path.join(root, '.e2e', 'http-jobs');
     const runs = path.join(jobs, 'runs');
+    const artifacts = path.join(jobs, 'artifacts');
     await mkdir(runs, { recursive: true, mode: 0o700 });
+    await mkdir(artifacts, { recursive: true, mode: 0o700 });
     // A link anywhere in the record path would write outside the project.
-    for (const dir of [path.join(root, '.e2e'), jobs, runs]) {
+    for (const dir of [path.join(root, '.e2e'), jobs, runs, artifacts]) {
       const info = await lstat(dir);
       if (info.isSymbolicLink() || !info.isDirectory()) {
         throw new ConfigurationError('INVALID_ARGUMENT', `the job directory ${dir} is not a real directory`);
@@ -196,10 +211,16 @@ export class JobService {
         options.log(`http-jobs: could not remove a stale run directory: ${processSecrets.redact(errorMessage(cause))}`);
       });
     }
-    const service = new JobService(options, { jobs, runs });
+    const service = new JobService(options, { jobs, runs, artifacts });
     await service.load();
+    // A crash can leave an artifact copy no record names; the first sweep takes
+    // it out along with expired records.
+    await service.sweep();
     // One sweep an hour, or sooner when a test injects a short retention.
-    service.sweeper = setInterval(() => service.sweep(), Math.max(10, Math.min(service.retentionMs, 60 * 60_000)));
+    service.sweeper = setInterval(
+      () => void service.sweep(),
+      Math.max(10, Math.min(service.retentionMs, 60 * 60_000)),
+    );
     service.sweeper.unref();
     return service;
   }
@@ -322,6 +343,38 @@ export class JobService {
     return { ...view(record), results, truncated: results.length < record.results.length };
   }
 
+  /**
+   * One job's kept artifacts. A finished job whose run is still alive has no
+   * index yet, so `ready` stays false until the run ends and the copy lands.
+   */
+  async artifacts(token: HttpMcpToken, jobId: string, baseUrl: string): Promise<JobArtifactListing> {
+    const record = this.owned(token, jobId);
+    const index = await readJobArtifactIndex(this.jobArtifactIndex(record.jobId));
+    if (index !== undefined && index.jobId === record.jobId) return listedArtifacts(index, baseUrl);
+    if (!TERMINAL.has(record.status) || this.pendingArtifacts.has(record.jobId) || this.runFor(record) !== undefined) {
+      return { jobId: record.jobId, ready: false, artifacts: [], truncated: false };
+    }
+    // The run ended before this gateway could keep its files, or the copy
+    // failed; the client must not poll forever.
+    return { jobId: record.jobId, ready: true, artifacts: [], truncated: false, error: 'artifacts_unavailable' };
+  }
+
+  /** One stored artifact for the download route; undefined for a job the token does not own. */
+  async artifactFile(token: HttpMcpToken, jobId: string, index: number): Promise<StoredArtifact | undefined> {
+    // The id becomes a file name below, so it must be one a record can carry.
+    const id = jobIdText(jobId);
+    if (id === undefined || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return undefined;
+    const record = this.records.get(id);
+    if (record === undefined || record.principal !== token.principal) return undefined;
+    const listing = await readJobArtifactIndex(this.jobArtifactIndex(id));
+    const artifact = listing?.jobId === id ? listing.artifacts[index] : undefined;
+    if (artifact?.file === undefined) return undefined;
+    const file = path.join(this.jobArtifactDir(id), artifact.file);
+    const info = await lstat(file).catch(() => undefined);
+    if (info === undefined || info.isSymbolicLink() || !info.isFile()) return undefined;
+    return { path: file, mediaType: artifact.mediaType, fileName: artifact.fileName, size: info.size };
+  }
+
   /** Seals every run, waits for its child, and marks what it cut as interrupted. */
   async close(): Promise<void> {
     this.closing = true;
@@ -355,6 +408,8 @@ export class JobService {
       }
       run.jobs.clear();
     }
+    // A run stopped just now may be copying its artifacts; keep them too.
+    while (this.preservations.size > 0) await Promise.allSettled(this.preservations);
     await this.drainWrites();
   }
 
@@ -438,12 +493,45 @@ export class JobService {
     }
     if (this.runs.get(run.key) === run) this.runs.delete(run.key);
     this.active.delete(run);
-    // Nothing reads a finished run's output again, and its reports were
-    // projected over IPC; leaving the directory would grow without bound.
-    void rm(run.output, { recursive: true, force: true }).catch((cause: unknown) => {
-      this.options.log(`job run ${run.runId}: could not remove output: ${processSecrets.redact(errorMessage(cause))}`);
-    });
+    // Both `exit` and `disconnect` land here; the first one owns the handoff.
+    if (run.outputHandled) return;
+    run.outputHandled = true;
+    this.preserveRun(run);
   };
+
+  /** Keeps every job's artifacts, then removes the run output that held them. */
+  private preserveRun(run: RunChannel): void {
+    const records = [...this.records.values()].filter((record) => record.runId === run.runId);
+    for (const record of records) this.pendingArtifacts.add(record.jobId);
+    const done = (async () => {
+      try {
+        const report = await readReportArtifacts(run.output);
+        for (const record of records) {
+          try {
+            await preserveJobArtifacts({
+              jobId: record.jobId,
+              resultIds: record.resultIds,
+              report,
+              output: run.output,
+              dir: this.jobArtifactDir(record.jobId),
+              indexFile: this.jobArtifactIndex(record.jobId),
+            });
+          } catch (cause) {
+            this.options.log(`job ${record.jobId}: could not keep its artifacts: ${processSecrets.redact(errorMessage(cause))}`);
+          }
+        }
+      } finally {
+        for (const record of records) this.pendingArtifacts.delete(record.jobId);
+        // Nothing reads a finished run's output again; leaving the directory
+        // would grow without bound.
+        await rm(run.output, { recursive: true, force: true }).catch((cause: unknown) => {
+          this.options.log(`job run ${run.runId}: could not remove output: ${processSecrets.redact(errorMessage(cause))}`);
+        });
+      }
+    })();
+    this.preservations.add(done);
+    void done.finally(() => this.preservations.delete(done));
+  }
 
   /** Routes one parsed child message to the job it names. */
   readonly handleMessage = (run: RunChannel, message: NonNullable<ReturnType<typeof parseHostMessage>>): void => {
@@ -693,8 +781,12 @@ export class JobService {
     return count;
   }
 
-  /** Removes finished records past their retention; a live job is never swept. */
-  private sweep(): void {
+  /**
+   * Removes finished records past their retention and any artifact file no
+   * record names; a live job is never swept. The artifact scan also clears a
+   * copy a crash left without an index.
+   */
+  private async sweep(): Promise<void> {
     const cutoff = Date.now() - this.retentionMs;
     for (const record of this.records.values()) {
       if (record.finishedAt === undefined || !TERMINAL.has(record.status)) continue;
@@ -705,6 +797,16 @@ export class JobService {
       }
       void rm(this.jobFile(record.jobId), { force: true }).catch(() => undefined);
     }
+    const entries = await readdir(this.artifactsDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const jobId = entry.isDirectory()
+        ? entry.name
+        : entry.isFile() && entry.name.endsWith('.json')
+          ? entry.name.slice(0, -'.json'.length)
+          : undefined;
+      if (jobId === undefined || this.records.has(jobId) || this.pendingArtifacts.has(jobId)) continue;
+      await rm(path.join(this.artifactsDir, entry.name), { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   private runKey(targetId: string): string {
@@ -713,6 +815,14 @@ export class JobService {
 
   private jobFile(jobId: string): string {
     return path.join(this.jobsDir, `${jobId}.json`);
+  }
+
+  private jobArtifactDir(jobId: string): string {
+    return path.join(this.artifactsDir, jobId);
+  }
+
+  private jobArtifactIndex(jobId: string): string {
+    return path.join(this.artifactsDir, `${jobId}.json`);
   }
 
   /** Serializes submissions and run creation for one RunKey. */
@@ -773,6 +883,8 @@ class RunChannel {
   runError: IpcError | undefined;
   /** The submission that started the run; a start-up failure belongs to it. */
   originJobId: string | undefined;
+  /** Set once the exit handler has handed the output to the artifact store. */
+  outputHandled = false;
   readonly jobs = new Set<string>();
   /** Jobs that finished with results; a late hook error can still fail them. */
   readonly finishedJobs = new Set<string>();

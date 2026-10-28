@@ -17,7 +17,7 @@ const SCRIPT_MCP_TOOLS = ['list_test_scripts', 'get_test_script', 'save_test_scr
 export type ScriptMcpTool = (typeof SCRIPT_MCP_TOOLS)[number];
 
 /** The asynchronous job tools the gateway serves itself. */
-const JOB_MCP_TOOLS = ['run_test', 'get_test_status', 'get_test_report'] as const;
+const JOB_MCP_TOOLS = ['run_test', 'get_test_status', 'get_test_report', 'list_test_artifacts'] as const;
 export type JobMcpTool = (typeof JOB_MCP_TOOLS)[number];
 
 /** Every tool a token may name. */

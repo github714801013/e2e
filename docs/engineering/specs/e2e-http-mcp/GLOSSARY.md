@@ -10,6 +10,15 @@ _避免_：客户端会话、浏览器会话。
 **Job（作业）**：调用方一次提交后可独立查询状态和结果的测试请求；多个作业可以属于同一次 Run。
 _避免_：Run、单条测试。
 
+**产物（Artifact）**：测试尝试登记到报告中的文件，按 `screenshot`、`video`、`download`、`log`、`other` 分类；它属于产生它的结果，不跨 Job 共享。
+_避免_：报告、日志文件。
+
+**产物清单（Artifact listing）**：一个 Job 结束后可下载的产物描述集合，按 Job 的 principal 归属和保留期管理。
+_避免_：`report.json`、失败证据。
+
+**产物保留（Artifact retention）**：把 Job 运行输出中的产物复制到 Job 存储、并随 Job 记录一起过期的生命周期。
+_避免_：缓存、永久归档。
+
 **RunKey（运行归属键）**：项目、环境、完整站点 Origin 和账号的组合，用于判断请求是否属于同一活动 Run。
 _避免_：域名、HTTP MCP 会话 ID。
 

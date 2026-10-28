@@ -14,6 +14,7 @@ import { JOB_TOOL_DEFINITIONS, callJobTool } from '../../src/mcp/http/job-tools.
 import { JobService } from '../../src/mcp/http/jobs.ts';
 
 const ALPHA: HttpMcpToken = { principal: 'alpha', tools: [], digest: Buffer.alloc(32) };
+const BASE_URL = 'http://127.0.0.1:1234/mcp/e2e';
 const BRAVO: HttpMcpToken = { principal: 'bravo', tools: [], digest: Buffer.alloc(32) };
 
 const roots: string[] = [];
@@ -56,6 +57,32 @@ function writeJob(dir: string, overrides: Record<string, unknown> = {}): string 
   mkdirSync(path.dirname(jobFile(dir, jobId)), { recursive: true });
   writeFileSync(jobFile(dir, jobId), JSON.stringify(record), 'utf8');
   return jobId;
+}
+
+/** Writes the artifact index a finished run would have left. */
+function writeIndex(artifacts: string, jobId: string): void {
+  writeFileSync(
+    path.join(artifacts, `${jobId}.json`),
+    JSON.stringify({
+      version: 1,
+      jobId,
+      createdAt: '2026-10-28T00:00:00.000Z',
+      artifacts: [
+        {
+          artifactId: 'attempt:artifact:0',
+          kind: 'screenshot',
+          mediaType: 'image/png',
+          redaction: 'complete',
+          resultId: 'result-a',
+          attempt: 1,
+          fileName: '001.png',
+          size: 3,
+          file: '0.png',
+        },
+      ],
+    }),
+    'utf8',
+  );
 }
 
 async function create(dir: string): Promise<JobService> {
@@ -109,9 +136,13 @@ describe('HTTP MCP job store', () => {
     expect(existsSync(path.join(dir, '.e2e', 'http-jobs', 'runs', 'stale-run'))).toBe(false);
   });
 
-  it('sweeps a finished job after the injected retention', async () => {
+  it('sweeps a finished job after the injected retention, its artifacts with it', async () => {
     const dir = root();
     writeJob(dir, { status: 'passed', finishedAt: new Date().toISOString() });
+    const artifacts = path.join(dir, '.e2e', 'http-jobs', 'artifacts');
+    mkdirSync(path.join(artifacts, 'job-1'), { recursive: true });
+    writeFileSync(path.join(artifacts, 'job-1', '0.png'), 'png', 'utf8');
+    writeIndex(artifacts, 'job-1');
     const service = await JobService.create({
       cwd: dir,
       env: {},
@@ -126,6 +157,59 @@ describe('HTTP MCP job store', () => {
     expect(service.status(ALPHA, 'job-1').status).toBe('passed');
     await expect.poll(() => existsSync(jobFile(dir, 'job-1')), { timeout: 5_000, interval: 25 }).toBe(false);
     expect(() => service.status(ALPHA, 'job-1')).toThrow(/does not exist/);
+    await expect.poll(() => existsSync(path.join(artifacts, 'job-1')), { timeout: 5_000, interval: 25 }).toBe(false);
+    expect(existsSync(path.join(artifacts, 'job-1.json'))).toBe(false);
+  });
+
+  it('lists a finished job\'s kept artifacts with a download URL, and no stored file name', async () => {
+    const dir = root();
+    writeJob(dir, { jobId: 'kept', status: 'passed', finishedAt: new Date().toISOString(), resultIds: ['result-a'] });
+    const artifacts = path.join(dir, '.e2e', 'http-jobs', 'artifacts');
+    mkdirSync(path.join(artifacts, 'kept'), { recursive: true });
+    writeFileSync(path.join(artifacts, 'kept', '0.png'), 'png', 'utf8');
+    writeIndex(artifacts, 'kept');
+    const service = await create(dir);
+
+    const listing = await service.artifacts(ALPHA, 'kept', BASE_URL);
+    expect(listing).toMatchObject({ jobId: 'kept', ready: true, truncated: false });
+    expect(listing.error).toBeUndefined();
+    expect(listing.artifacts).toEqual([
+      {
+        artifactId: 'attempt:artifact:0',
+        kind: 'screenshot',
+        mediaType: 'image/png',
+        redaction: 'complete',
+        resultId: 'result-a',
+        attempt: 1,
+        fileName: '001.png',
+        size: 3,
+        downloadUrl: `${BASE_URL}/artifacts/kept/0`,
+      },
+    ]);
+    expect(listing.artifacts[0]).not.toHaveProperty('file');
+
+    await expect(service.artifacts(BRAVO, 'kept', BASE_URL)).rejects.toThrow(/another client/);
+    await expect(service.artifacts(ALPHA, 'missing', BASE_URL)).rejects.toThrow(/does not exist/);
+
+    const stored = await service.artifactFile(ALPHA, 'kept', 0);
+    expect(stored).toMatchObject({ fileName: '001.png', mediaType: 'image/png', size: 3 });
+    expect(await service.artifactFile(BRAVO, 'kept', 0)).toBeUndefined();
+    expect(await service.artifactFile(ALPHA, 'kept', 1)).toBeUndefined();
+    expect(await service.artifactFile(ALPHA, 'missing', 0)).toBeUndefined();
+  });
+
+  it('reports a finished job with no index as ready but unavailable, never as an endless wait', async () => {
+    const dir = root();
+    writeJob(dir, { jobId: 'lost', status: 'passed', finishedAt: new Date().toISOString() });
+    const service = await create(dir);
+
+    await expect(service.artifacts(ALPHA, 'lost', BASE_URL)).resolves.toEqual({
+      jobId: 'lost',
+      ready: true,
+      artifacts: [],
+      truncated: false,
+      error: 'artifacts_unavailable',
+    });
   });
 
   it('serves a job only to the principal that submitted it', async () => {
@@ -190,10 +274,10 @@ describe('HTTP MCP job store', () => {
     await expect(service.submit(ALPHA, { targetId: 'web', testFiles: ['../up.e2e.ts'] })).rejects.toThrow(/project-relative/);
 
     await expect(
-      callJobTool(service, ALPHA, 'run_test', { targetId: 'web', testFiles: ['tests/a.e2e.ts'], workers: 4 }),
+      callJobTool(service, ALPHA, 'run_test', { targetId: 'web', testFiles: ['tests/a.e2e.ts'], workers: 4 }, BASE_URL),
     ).rejects.toThrow(/does not take "workers"/);
-    await expect(callJobTool(service, ALPHA, 'get_test_status', { jobId: 'missing', extra: true })).rejects.toThrow(/does not take/);
-    await expect(callJobTool(service, ALPHA, 'get_test_status', {})).rejects.toThrow(/jobId/);
+    await expect(callJobTool(service, ALPHA, 'get_test_status', { jobId: 'missing', extra: true }, BASE_URL)).rejects.toThrow(/does not take/);
+    await expect(callJobTool(service, ALPHA, 'get_test_status', {}, BASE_URL)).rejects.toThrow(/jobId/);
   });
 
   it('refuses a job directory that is a link to somewhere else', async () => {
@@ -215,6 +299,6 @@ describe('HTTP MCP job store', () => {
       additionalProperties: false,
     });
     expect(Object.keys(runTest?.inputSchema.properties ?? {})).toEqual(['targetId', 'testFiles', 'idempotencyKey']);
-    expect(JOB_TOOL_DEFINITIONS.map((tool) => tool.name)).toEqual(['run_test', 'get_test_status', 'get_test_report']);
+    expect(JOB_TOOL_DEFINITIONS.map((tool) => tool.name)).toEqual(['run_test', 'get_test_status', 'get_test_report', 'list_test_artifacts']);
   });
 });
