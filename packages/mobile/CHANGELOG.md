@@ -1,5 +1,25 @@
 # @e2e-dev/mobile
 
+## 0.12.5
+
+### Patch Changes
+
+- [#1379](https://github.com/tester-army/e2e/pull/1379) [`9e53c40`](https://github.com/tester-army/e2e/commit/9e53c40a94fed6585d4e57cf14b8e91c405cb5d8) Thanks [@okwasniewski](https://github.com/okwasniewski)! - A mobile target without `device` skips a booted simulator or emulator that another agent-device session holds, such as one another tool is driving, and drives the free ones. When every booted device is held, the run fails at `prepare` naming the holding sessions instead of failing on the first one.
+
+- [#1420](https://github.com/tester-army/e2e/pull/1420) [`512eed7`](https://github.com/tester-army/e2e/commit/512eed789dd1234011c5997b680ab1b90e3f8772) Thanks [@okwasniewski](https://github.com/okwasniewski)! - Bump agent-device to 0.21.33.
+
+- [#1382](https://github.com/tester-army/e2e/pull/1382) [`3a8d6f1`](https://github.com/tester-army/e2e/commit/3a8d6f1b6cdaa4c7975c55bf25f67d2e76143b21) Thanks [@okwasniewski](https://github.com/okwasniewski)! - Bump agent-device to 0.21.31, zod to 4.6.7, @modelcontextprotocol/server to 2.4.0, and oxc to 0.155.0.
+
+- [#1380](https://github.com/tester-army/e2e/pull/1380) [`c3c4238`](https://github.com/tester-army/e2e/commit/c3c4238e8d47caeebf2926f522e8cd8b8fb7cb51) Thanks [@okwasniewski](https://github.com/okwasniewski)! - Add the unstable `device.unstable_raw`, which may change or go away in any release: the test's agent-device session name, the device's id and name, and an agent-device `client` bound to that session, for what the `device` methods don't cover. Client calls aren't recorded as steps, replayed from the agent cache, or redacted.
+
+- [#1334](https://github.com/tester-army/e2e/pull/1334) [`6c8e71f`](https://github.com/tester-army/e2e/commit/6c8e71f1ddab036d5cd82ca671163de6e9e82ca0) Thanks [@21prnv](https://github.com/21prnv)! - `locator.filter()` takes `hasNot`, which drops matches whose subtree resolves a locator, as in Playwright. Third-party engines must handle the new `hasNot` field of a `filter` expression.
+
+- [#1410](https://github.com/tester-army/e2e/pull/1410) [`b309bcd`](https://github.com/tester-army/e2e/commit/b309bcdc89d5b990a7908ef8ea8e3ae2dadfc4b1) Thanks [@bheemreddy-samsara](https://github.com/bheemreddy-samsara)! - Re-read mobile fill and clear targets before typing, including cached replay. Missing inputs, changed security state, or incomplete captures retry after a fresh observation.
+
+- [#1297](https://github.com/tester-army/e2e/pull/1297) [`bdd7315`](https://github.com/tester-army/e2e/commit/bdd7315b7f74840581a2ce72b77f251ef05047fa) Thanks [@shamilovtim](https://github.com/shamilovtim)! - A test step on a control the keyboard moves now waits for it to land instead of tapping where it was. Moving-target refusals are retried when agent-device sent no input.
+
+- [#1037](https://github.com/tester-army/e2e/pull/1037) [`a481fd3`](https://github.com/tester-army/e2e/commit/a481fd39c69e3e0f88a94c1fe3f4acada164cbf6) Thanks [@rudycelekli](https://github.com/rudycelekli)! - `locator.filter()` takes `hasNotText`, which drops matches whose text contains a string or matches a RegExp, as in Playwright. Third-party engines must handle the new `hasNotText` field of a `filter` expression.
+
 ## 0.12.4
 
 ### Patch Changes

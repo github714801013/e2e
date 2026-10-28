@@ -1,5 +1,15 @@
 # @e2e-dev/web
 
+## 0.15.4
+
+### Patch Changes
+
+- [#1334](https://github.com/tester-army/e2e/pull/1334) [`6c8e71f`](https://github.com/tester-army/e2e/commit/6c8e71f1ddab036d5cd82ca671163de6e9e82ca0) Thanks [@21prnv](https://github.com/21prnv)! - `locator.filter()` takes `hasNot`, which drops matches whose subtree resolves a locator, as in Playwright. Third-party engines must handle the new `hasNot` field of a `filter` expression.
+
+- [#1037](https://github.com/tester-army/e2e/pull/1037) [`a481fd3`](https://github.com/tester-army/e2e/commit/a481fd39c69e3e0f88a94c1fe3f4acada164cbf6) Thanks [@rudycelekli](https://github.com/rudycelekli)! - `locator.filter()` takes `hasNotText`, which drops matches whose text contains a string or matches a RegExp, as in Playwright. Third-party engines must handle the new `hasNotText` field of a `filter` expression.
+
+- [#1288](https://github.com/tester-army/e2e/pull/1288) [`8ce2c65`](https://github.com/tester-army/e2e/commit/8ce2c6533caf0596b16d31d3588cb6720c863176) Thanks [@DeryFerd](https://github.com/DeryFerd)! - Screenshots no longer change the inline style of editable elements to hide the text caret, so a server-rendered app hydrating while a capture runs no longer reports a React attribute mismatch on its inputs and textareas. A capture runs with the caret hidden in the frames it can reach, and the stylesheet is taken back from every frame afterwards.
+
 ## 0.15.3
 
 ### Patch Changes
