@@ -255,10 +255,17 @@ export function resolveConfig(
   }
 
   const recordings = runRecordings(raw, cli);
-  const targets = resolveTargets(raw.targets, options.projectRoot, (target, where) => ({
-    trace: targetRecording(recordings.trace, target.trace, `${where} trace`, 'trace'),
-    video: targetRecording(recordings.video, target.video, `${where} video`, 'video'),
-  }));
+  // Secrets resolve first: a target's shared login names one of the accounts.
+  const { credentials, secrets, allSecrets } = resolveSecrets(raw, env);
+  const targets = resolveTargets(
+    raw.targets,
+    options.projectRoot,
+    (target, where) => ({
+      trace: targetRecording(recordings.trace, target.trace, `${where} trace`, 'trace'),
+      video: targetRecording(recordings.video, target.video, `${where} video`, 'video'),
+    }),
+    credentials,
+  );
   const tests = normalizeTests(raw.tests, options.projectRoot);
 
   const timeout = positiveInt(raw.timeout, 'timeout', 'milliseconds') ?? 120_000;
@@ -288,7 +295,6 @@ export function resolveConfig(
   const { reporters, customReporters } = resolveReporters(raw, cli);
 
   const projectId = resolveProjectId(raw.projectId, options.projectRoot);
-  const { credentials, secrets, allSecrets } = resolveSecrets(raw, env);
   checkEngineSecrets(targets, secrets, credentials);
   const { agents, agentNames, agent } = resolveAgents(raw.agents, cli.agents);
   const limits = runLimits(agents.values());

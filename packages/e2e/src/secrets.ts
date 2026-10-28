@@ -148,6 +148,20 @@ export function isSecret(value: unknown): value is Secret {
   );
 }
 
+/** The handle for one resolved account, for the runner's own code and `credentials.user()`. */
+export function credentialHandle(resolved: {
+  readonly name: string;
+  readonly username: string;
+  readonly password: RegisteredSecret;
+}): Credential {
+  return Object.freeze({
+    name: resolved.name,
+    username: resolved.username,
+    password: secretHandle(resolved.password),
+    [credentialBrand]: true as const,
+  });
+}
+
 export const credentials: Credentials = {
   user(name: string): Credential {
     const registry = requireRegistry('credentials.user()', 'AUTH_CREDENTIAL_UNAVAILABLE');
@@ -158,12 +172,7 @@ export const credentials: Credentials = {
         `credential "${name}" is not configured; add it to config.credentials or E2E_USER_* variables`,
       );
     }
-    return Object.freeze({
-      name,
-      username: resolved.username,
-      password: secretHandle(resolved.password),
-      [credentialBrand]: true as const,
-    });
+    return credentialHandle({ name, username: resolved.username, password: resolved.password });
   },
 };
 

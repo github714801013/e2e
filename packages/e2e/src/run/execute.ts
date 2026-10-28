@@ -9,6 +9,7 @@ import {
   classifyError,
   ConfigurationError,
   E2EError,
+  errorMessage,
   InfrastructureError,
   serializeError,
   TestError,
@@ -57,11 +58,13 @@ import { interruptedInPhase, interruptedSkip, pairKey, pairResult, unstartedResu
 import { adoptSecrecy, carriedSecrecy, processSecrets, registerDerivedSecrets, redactForSession, resolveSecretValue, sessionSecrecy, staticSecretLedger } from './secrecy.ts';
 import { isSecret } from '../secrets.ts';
 import { SessionStaging, SessionStore, targetIdentity, type SessionIdentity } from './sessions.ts';
+import { sharedSessionIdentity, SharedSessionStore } from './shared-sessions.ts';
 import { StepRecorder, type StepProgress } from './steps.ts';
 import { EngineError } from '../engine/contract.ts';
 import { hostedVideoUrl } from '../engine/recording.ts';
 import { WorkerModels } from './worker-models.ts';
-import type { SetupFn } from '../types.ts';
+import type { SessionFixtures, SetupFn } from '../types.ts';
+import type { ResolvedTargetSession } from '../config/targets.ts';
 
 export interface ExecutionEvents {
   onResult?(result: ResultRecord): void;
@@ -197,6 +200,8 @@ export class TargetExecutor implements SerialHost {
   private engineReady: Promise<void> | undefined;
   /** The stored screenshots the run wrote, so no comparison passes against one nobody reviewed. */
   private readonly writtenScreenshots: WrittenScreenshots;
+  /** The target's shared login store, built on the first attempt that needs it. */
+  private sharedSessionStore: SharedSessionStore | undefined;
 
   constructor(private readonly options: TargetExecutorOptions) {
     this.target = options.target;
@@ -658,6 +663,116 @@ export class TargetExecutor implements SerialHost {
   }
 
   /**
+   * Restores the target's shared login before the test runs, logging in under
+   * the cross-process lock when the saved state no longer checks out. A
+   * failed check, login, or lock wait stops the run: every other attempt
+   * would meet the same failure, so it is reported once for the run.
+   */
+  private async prepareSharedSession(
+    pair: TestTargetPair,
+    context: AttemptContext,
+    session: TargetSession,
+    fixtures: SessionFixtures,
+    attemptId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const login = this.target.session;
+    if (login === undefined) return;
+    if (context.kind === 'setup') return;
+    // A test that names a saved session, or turns the shared one off, keeps
+    // its own login: it is testing that flow.
+    if (pair.options.session !== undefined || pair.options.sharedSession === false) return;
+    const shared = context.kind === 'serial' ? context.shared : undefined;
+    if (shared?.provisioned === true) return;
+
+    const store = (this.sharedSessionStore ??= new SharedSessionStore(this.config.projectRoot));
+    const identity = sharedSessionIdentity(this.target);
+    const redact = (text: string): string => redactForSession(session, this.config.allSecrets, text);
+    const restoreCached = async (): Promise<boolean> => {
+      const state = await store.load(login.key, identity);
+      if (state === undefined) return false;
+      await this.lifecycle('restoring the shared session', this.config.launchTimeout, 'LAUNCH_TIMEOUT', signal, (launchSignal) =>
+        session.restoreState!(state, this.op(attemptId, this.config.launchTimeout, launchSignal)),
+      );
+      return true;
+    };
+    const check = async (): Promise<boolean> => {
+      try {
+        return await login.check(fixtures, login.credential);
+      } catch (cause) {
+        throw new ConfigurationError(
+          'SESSION_CHECK_FAILED',
+          `the shared login check for target "${this.target.name}" threw: ${errorMessage(cause)}`,
+          { cause },
+        );
+      }
+    };
+    try {
+      if ((await restoreCached()) && (await check())) {
+        if (shared !== undefined) shared.provisioned = true;
+        return;
+      }
+      await store.withLoginLock(login.key, signal, async () => {
+        // Another worker may have logged in while this one waited: a state
+        // that checks out now is used as is, without a second login.
+        if ((await restoreCached()) && (await check())) return;
+        await this.signIn(login, fixtures);
+        const state = await session.captureState!(this.op(attemptId, this.config.actionTimeout, signal));
+        await store.save(login.key, identity, login.account, state);
+      });
+      if (shared !== undefined) shared.provisioned = true;
+    } catch (cause) {
+      const error = classifyError(cause);
+      if (error.code === 'SESSION_CHECK_FAILED' || error.code === 'SESSION_LOGIN_FAILED' || error.code === 'SESSION_LOCK_TIMEOUT') {
+        this.options.events?.onRunAbort?.({ error: serializeError(error, { projectRoot: this.config.projectRoot, redact }) });
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Runs the target's login, retried once, then checks it took: a login that
+   * does not produce a usable session fails the run instead of saving bad
+   * state other runs would restore.
+   */
+  private async signIn(login: ResolvedTargetSession, fixtures: SessionFixtures): Promise<void> {
+    let failed: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await login.login(fixtures, login.credential);
+        failed = undefined;
+        break;
+      } catch (cause) {
+        failed = cause;
+      }
+    }
+    const account = `account "${login.account}" on target "${this.target.name}"`;
+    if (failed !== undefined) {
+      throw new ConfigurationError(
+        'SESSION_LOGIN_FAILED',
+        `the shared login for ${account} failed after 2 attempts: ${errorMessage(failed)}`,
+        { cause: failed },
+      );
+    }
+    let signedIn: boolean;
+    try {
+      signedIn = await login.check(fixtures, login.credential);
+    } catch (cause) {
+      throw new ConfigurationError(
+        'SESSION_LOGIN_FAILED',
+        `the shared login for ${account} did not produce a usable session: ${errorMessage(cause)}`,
+        { cause },
+      );
+    }
+    if (!signedIn) {
+      throw new ConfigurationError(
+        'SESSION_LOGIN_FAILED',
+        `the shared login for ${account} ran, but the session still does not check out`,
+      );
+    }
+  }
+
+  /**
    * The plaintext of a secret the target's engine declared, for an option it
    * hands the app (basic-auth credentials). Registered for the session's and
    * the process's redaction by `resolveSecretValue`, with every value the
@@ -1075,6 +1190,20 @@ export class TargetExecutor implements SerialHost {
       };
       const mainWork = async (): Promise<void> => {
         try {
+          // The shared login restores, checks, and when needed logs in before
+          // any fixture hook runs, inside the test's deadline and signal.
+          // createFixtures defines the engine's contributed fixtures on this
+          // object already; its type only names the core ones, so the hook
+          // surface is wider than the attempt's own fixture type.
+          const sessionFixtures: unknown = fixtures;
+          await this.prepareSharedSession(
+            pair,
+            context,
+            session,
+            sessionFixtures as SessionFixtures,
+            attemptId,
+            attemptAbort.signal,
+          );
           enter('beforeEach');
           await extended.setUp();
           attemptAbort.signal.throwIfAborted();

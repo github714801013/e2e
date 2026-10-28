@@ -7,6 +7,7 @@
 - Subscriptions and API keys
 - The config
 - The app under test
+- Shared sign-in
 - Environment variables the runner reads
 - Mobile targets
 - Done when
@@ -288,6 +289,46 @@ For an app started elsewhere, point `app.url` at it, literally or via
 `process.env.APP_URL ?? 'http://localhost:3000'`; the runner reads no
 `APP_URL` and loads no `.env`, so put `process.loadEnvFile('.env')` atop
 `e2e.config.ts` (workers re-import it).
+
+## Shared sign-in
+
+A target can carry one login kept between runs, so tests start signed in
+without a setup test:
+
+```ts
+session: {
+  account: 'admin',
+  login: async ({ app, screen }, admin) => {
+    await app.open('/login');
+    await screen.getByLabel('Username').fill(admin.username);
+    await screen.getByLabel('Password').fill(admin.password);
+    await screen.getByRole('button', 'Sign in').tap();
+  },
+  check: async ({ app, screen }) => (await screen.getByRole('status', 'Greeting').count()) > 0,
+},
+```
+
+- `account` names a `credentials` entry; `login(fixtures, admin)` signs in,
+  `check(fixtures)` returns `true` while the saved state is still signed in.
+- Before each test the runner restores the state and calls `check`. A failed
+  check signs in once under a lock shared by every worker, saves the new
+  state, then checks it again. Checks run in parallel; only a sign-in waits
+  for the lock. The lock has no heartbeat: one older than ten minutes is
+  taken over, so a crashed worker cannot block the run.
+- The state lives in `.e2e/sessions/shared/` under the project root,
+  encrypted with AES-256-GCM and a key file beside it (owner-only), outside
+  `output`. There is no expiry: `check` decides per test. Delete the
+  directory to force a fresh sign-in.
+- The key is the account, the app's `environment`, and `app.identity` (else
+  its origin): renaming a target or changing a port keeps the login, another
+  account or environment gets its own.
+- `login` is retried once. A `login` or `check` that throws, or a state that
+  still fails `check` right after a sign-in, stops the run
+  (`SESSION_LOGIN_FAILED`, `SESSION_CHECK_FAILED`, exit 2) and saves nothing.
+- Needs an engine that saves and restores state (`web()`); a mobile target
+  declaring `session` is `UNSUPPORTED_CAPABILITY` at config load. Setup
+  tests, tests naming a `session`, and tests with `sharedSession: false`
+  never use it; a serial group checks once for the whole group.
 
 ## Environment variables the runner reads
 

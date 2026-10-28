@@ -1121,6 +1121,107 @@ describe('resolveConfig', () => {
   });
 });
 
+describe('shared login session config', () => {
+  const ACCOUNT = { username: 'tester@example.test', password: 'pw-shared-login' };
+  const REVIEWER = { username: 'reviewer@example.test', password: 'pw-reviewer-login' };
+
+  /** An engine declaring the state capability a target session requires. */
+  function statefulEngine() {
+    return defineEngine({
+      name: 'fake',
+      version: '1.0.0',
+      spiVersion: 1,
+      observe: async () => snapshot([]),
+      state: {
+        capture: async () => ({ format: 'fake-state', version: 1, data: {} }),
+        restore: async () => undefined,
+      },
+    });
+  }
+
+  function sessionTarget(name: string, app: TargetApp = { url: 'http://127.0.0.1:3000' }): Target {
+    return {
+      name,
+      platform: 'web',
+      engine: statefulEngine(),
+      app,
+      session: { account: 'tester', login: async () => undefined, check: async () => true },
+    };
+  }
+
+  const keysOf = (targets: Target[], credentials: Record<string, typeof ACCOUNT> = { tester: ACCOUNT, reviewer: REVIEWER }) =>
+    resolve({ targets, credentials }).targets.map((target) => target.session?.key);
+
+  it('keys a session by the app, its environment, and the account, never by the target name', () => {
+    const [web, renamed] = keysOf([sessionTarget('web'), sessionTarget('renamed')]);
+    expect(web).toBeDefined();
+    expect(renamed).toBe(web);
+
+    const [tester, reviewer] = keysOf([
+      sessionTarget('web'),
+      { ...sessionTarget('reviewer-target'), session: { ...sessionTarget('reviewer-target').session!, account: 'reviewer' } },
+    ]);
+    expect(reviewer).not.toBe(tester);
+
+    const [production, test] = keysOf([
+      sessionTarget('web', { url: 'http://127.0.0.1:3000', environment: 'production' }),
+      sessionTarget('web-staging'),
+    ]);
+    expect(production).not.toBe(test);
+
+    const [here, elsewhere] = keysOf([sessionTarget('web'), sessionTarget('web-other', { url: 'http://127.0.0.1:3001' })]);
+    expect(elsewhere).not.toBe(here);
+  });
+
+  it('keeps the key on the declared app identity, so another port or URL still shares the login', () => {
+    const [first, second] = keysOf([
+      sessionTarget('web', { url: 'http://127.0.0.1:3000', identity: 'shop' }),
+      sessionTarget('web-alt', { url: 'http://localhost:4000', identity: 'shop' }),
+    ]);
+    expect(second).toBe(first);
+  });
+
+  it('keeps the login out of the config digest', () => {
+    const withLogin = resolve({ targets: [sessionTarget('web')], credentials: { tester: ACCOUNT } }).configDigest;
+    const withoutLogin = resolve({
+      targets: [{ name: 'web', platform: 'web', engine: statefulEngine(), app: { url: 'http://127.0.0.1:3000' } }],
+      credentials: { tester: ACCOUNT },
+    }).configDigest;
+    expect(withLogin).toBe(withoutLogin);
+  });
+
+  it('refuses a malformed declaration, naming what is wrong', () => {
+    const session = { account: 'tester', login: async () => undefined, check: async () => true };
+    const credentials = { tester: ACCOUNT };
+    expect(() =>
+      resolve({ targets: [{ ...sessionTarget('web'), session: { ...session, remember: true } } as Target], credentials }),
+    ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG', message: expect.stringContaining('unknown key "remember"') }));
+    expect(() => resolve({ targets: [{ ...sessionTarget('web'), session: { ...session, account: ' ' } }], credentials })).toThrow(
+      /session account must be a non-empty string/,
+    );
+    expect(() => resolve({ targets: [{ ...sessionTarget('web'), session: { ...session, account: 'ghost' } }], credentials })).toThrow(
+      /not configured in credentials; configured: tester/,
+    );
+    expect(() =>
+      resolve({ targets: [{ ...sessionTarget('web'), session: { ...session, login: 'nope' } } as unknown as Target], credentials }),
+    ).toThrow(/session login and check must be functions/);
+    expect(() => resolve({ targets: [{ ...sessionTarget('web', {}), session }], credentials })).toThrow(/app has no url/);
+  });
+
+  it('refuses a session on an engine without state, naming the engine', () => {
+    const target: Target = {
+      name: 'web',
+      platform: 'web',
+      engine: fakeEngine(),
+      app: { url: 'http://127.0.0.1:3000' },
+      session: { account: 'tester', login: async () => undefined, check: async () => true },
+    };
+    expect(() => resolve({ targets: [target], credentials: { tester: ACCOUNT } })).toThrow(
+      expect.objectContaining({ code: 'UNSUPPORTED_CAPABILITY', message: expect.stringContaining('engine fake') }),
+    );
+  });
+});
+
 describe('discoverConfig', () => {
   /** A temp tree with the given files (a trailing slash makes a directory), removed after `body`. */
   function inTree(files: readonly string[], body: (root: string) => void): void {

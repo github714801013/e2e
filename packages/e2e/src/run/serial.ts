@@ -45,6 +45,8 @@ export interface SharedSerialSession {
   readonly priorSteps: StepRecord[];
   /** Executor scratch memory shared by every member, as the ledger is. */
   readonly memory: Map<string, unknown>;
+  /** Whether the group's shared login was already restored, checked, or logged in for a member. */
+  provisioned: boolean;
 }
 
 /** Executor capabilities the serial runner borrows. */
@@ -430,6 +432,7 @@ async function runSerialAttempt(
       artifactSegments,
       priorSteps: [],
       memory: new Map(),
+      provisioned: false,
     };
   } catch (cause) {
     endBeforeMembers(record, members, serializeError(classifyError(cause), { phase: 'launch' }), host.interruptSignal);

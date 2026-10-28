@@ -291,6 +291,21 @@ secret was filled.
 The runner refuses an invalid, expired, missing, or mismatched session. See
 the [session errors](/reference/errors).
 
+### Shared sign-in
+
+A target's [shared sign-in](/reference/config#session) keeps one envelope per
+app identity, environment, and account across runs, so it sits outside the
+per-run directory and its key outlives the process.
+
+| Property | Value |
+| --- | --- |
+| Location | `.e2e/sessions/shared/` under the project root, directory mode `0700`, files `0600` |
+| Cipher | AES-256-GCM, a fresh 12-byte IV per save |
+| Key | 32 random bytes, created once per project and kept in `shared.key`. Mode `0600` applies on POSIX file systems; one that ignores it leaves the key readable to anyone who can read the project directory. |
+| Bound to | Engine name and version, engine SPI version, platform, and app identity, authenticated as additional data; the account and environment are part of the file name's key |
+| Lifetime | Until the directory is deleted or the envelope no longer matches its identity |
+| Cleanup | Not removed at run end; deleting the directory forces a fresh sign-in |
+
 ### Cache trust
 
 Cache entries replay actions without a model and aren't signed.
@@ -325,6 +340,7 @@ project-relative path you configure.
 | `results/.../screen-at-failure.txt` | The redacted tree at the moment of failure. | complete |
 | `ai-trace.json` | Every model call, opt-in through `--ai-trace`. Prompts are the redacted ones the model saw. Inline image bytes are replaced by their size. | as the prompt |
 | `sessions/<runId>/` | Encrypted sessions, deleted at cleanup. | encrypted |
+| `.e2e/sessions/shared/` | The shared sign-in envelope and its key, kept across runs until you delete the directory. | encrypted |
 | `videos/<session>/*.webm`, `*.mp4` | Videos an `e2e mcp` session recorded with `start_recording`, kept until you delete them. Never handed to `artifacts.store`. | none |
 | `cache.dir` (default `.e2e/cache/`) | Replay cache entries. | secret-free by construction |
 | The path in `command.log` | Your app's stdout and stderr, verbatim. Must be inside the project root. | none |

@@ -82,11 +82,75 @@ On a browser target, a session holds cookies, local storage, and IndexedDB,
 not server or database state. A restore leaves no page open, so each test
 calls `app.open()` first.
 
-A session lasts one run. The runner encrypts it with a key held only in
+A named session lasts one run. The runner encrypts it with a key held only in
 memory and deletes it at cleanup. See [Sessions](/reference/security#sessions).
+For a sign-in every test should start with, without a setup test, declare a
+[shared login](#share-one-sign-in-across-runs) on the target.
 
 In a dynamic `runDynamic` run, later jobs reuse the snapshot saved by the same setup, while each test still opens its own context.
 A failed shared setup skips the tests that depend on it instead of signing in again or overwriting the run's snapshots.
+
+## Share one sign-in across runs
+
+A target can carry one login of its own, kept between runs, so tests don't
+sign in and no setup test is needed:
+
+```ts title="e2e.config.ts"
+targets: [{
+  engine: web(),
+  app: { url: 'http://127.0.0.1:3000' },
+  session: {
+    account: 'admin',
+    login: async ({ app, screen }, admin) => {
+      await app.open('/login');
+      await screen.getByLabel('Username').fill(admin.username);
+      await screen.getByLabel('Password').fill(admin.password);
+      await screen.getByRole('button', 'Sign in').tap();
+    },
+    check: async ({ app, screen }) => {
+      await app.open('/dashboard');
+      return (await screen.getByRole('status', 'Greeting').count()) > 0;
+    },
+  },
+}],
+```
+
+- Before a test runs, the runner restores the saved state and calls `check`.
+  `true` runs the test signed in; `false` signs in with `login` under an
+  exclusive lock shared by every worker, saves the new state, and continues.
+- Workers check in parallel; only a sign-in is serialized. A worker that
+  waited for the lock reloads what the winner saved and checks again before
+  signing in on its own.
+- The lock has no heartbeat: one older than ten minutes is taken over, so a
+  crashed worker cannot block the run. A sign-in that legitimately runs that
+  long is restarted by the worker that takes over. Waiting more than ten and
+  a half minutes fails with
+  [`SESSION_LOCK_TIMEOUT`](/reference/errors), though a test's own timeout
+  normally fires first.
+- The state is keyed by the app (`app.identity`, else its origin), the app's
+  `environment`, and the account. The target's name and the run's ports are
+  not part of the key: renaming a target or moving to a new port keeps the
+  login. Different accounts keep one state each.
+- It lives in `.e2e/sessions/shared/` under the project root, encrypted with
+  AES-256-GCM; the key sits beside it with owner-only permissions. It is not
+  part of a run's [`output`](/reference/config#output), so clearing results
+  never clears the login.
+- There is no expiry: `check` decides, once per test. A corrupt,
+  undecryptable, or mismatched envelope is a cold start, not an error. Delete
+  `.e2e/sessions/shared/` to force a fresh sign-in.
+- `login` is retried once. When `login` or `check` throws, or the session
+  still fails `check` right after a sign-in, the run stops with
+  `SESSION_LOGIN_FAILED` or `SESSION_CHECK_FAILED` (exit 2) rather than fail
+  every test that meets it. Nothing is saved unless the check passes.
+- `test.setup` tests and tests naming a `session` never use the shared login.
+  A test that signs in itself sets [`sharedSession: false`](/reference/test#test).
+  A serial group checks once for the whole group.
+- Only an engine that saves and restores state supports it. `web()` does; the
+  mobile engine does not yet, and a target declaring `session` on it fails at
+  config load with `UNSUPPORTED_CAPABILITY`.
+- `login` and `check` are not part of the config digest, so changing them
+  keeps the replay cache. The check before each test is what notices a stale
+  recording of the sign-in flow.
 
 ## Credentials
 

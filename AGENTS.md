@@ -557,8 +557,12 @@ trees, on both platforms, without a device.
     `file:`, `data:`, `javascript:`, `view-source:`, `blob:`, `filesystem:`.
     There is no origin or host allowlist; PR #290 removed them on purpose, since a
     click reaches any origin a typed URL could.
-  - Sessions are per-run, target-bound, AES-256-GCM encrypted with a
+  - Per-run sessions are target-bound, AES-256-GCM encrypted with a
     memory-only key, and deleted at cleanup; payloads never enter diagnostics.
+    A target's shared sign-in keeps one envelope per app identity,
+    environment, and account under `<projectRoot>/.e2e/sessions/shared/`,
+    encrypted with a key persisted beside it at mode 0600 on POSIX, and kept
+    across runs until the directory is deleted.
   - Reports escape contextually, strip terminal controls, generate artifact
     names, and never let a label become a path component.
   - Test, config, and engine code run with the runner's full OS authority;

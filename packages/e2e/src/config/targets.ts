@@ -6,14 +6,25 @@
 
 import { isEngineHandle, type EngineHandle } from '../engine/index.ts';
 import { ConfigurationError } from '../internal/errors.ts';
+import { canonicalDigest } from '../internal/ids.ts';
 import type { ResolvedRecording } from '../internal/recording-modes.ts';
-import type { Target } from '../types.ts';
+import { credentialHandle } from '../secrets.ts';
+import type { Credential, Target, TargetSessionConfig } from '../types.ts';
 import { checkTargetApp, digestTargetApp, resolveTargetApp, TARGET_KEYS, unknownTargetKey, type ResolvedApp, type TargetAppDeclaration } from './app.ts';
 import { isRecord } from './command.ts';
+import type { ResolvedCredential } from './resolve.ts';
 import { describeValue } from './validate.ts';
 
 /** The free port the run assigned to each target whose URL asked for one, by target name. */
 export type PortAssignments = Readonly<Record<string, number>>;
+
+/** The declared shared login with its resolved account and stable store key. */
+export interface ResolvedTargetSession extends TargetSessionConfig {
+  /** The account's handle; the password stays opaque. */
+  readonly credential: Credential;
+  /** Stable store key: the app's identity and the account, never a run's port. */
+  readonly key: string;
+}
 
 export interface ResolvedTarget {
   readonly name: string;
@@ -25,6 +36,8 @@ export interface ResolvedTarget {
   readonly app: ResolvedApp;
   /** The app as declared and checked: what `bindTargets` resolves again on the run's port, and what the digest reads. */
   readonly declaredApp: TargetAppDeclaration;
+  /** The shared login every test on the target restores, when it declares one. */
+  readonly session?: ResolvedTargetSession;
   /** Which attempts on the target record a trace: `--trace`, else the target's `trace`, else the config's, else `on` (`on-first-retry` in CI). A test's own `trace` wins over it. */
   readonly trace: ResolvedRecording;
   /** Which attempts on the target record a video: `--video`, else the target's `video`, else the config's, else `off`. A test's own `video` wins over it. */
@@ -39,6 +52,7 @@ export function resolveTargets(
   declared: unknown,
   projectRoot: string,
   recordings: (target: Target, where: string) => Pick<ResolvedTarget, 'trace' | 'video'>,
+  credentials: ReadonlyMap<string, ResolvedCredential>,
 ): readonly ResolvedTarget[] {
   if (declared === undefined) {
     throw new ConfigurationError(
@@ -85,16 +99,85 @@ export function resolveTargets(
     seen.add(name);
     if (target.name === undefined) defaulted.add(name);
     const declaredApp = checkTargetApp(name, target.engine, target.app);
+    const app = resolveTargetApp(name, declaredApp, projectRoot);
+    const session = resolveSession(where, target.session, app, target.engine, credentials);
     return {
       name,
       index,
       platform,
       engine: target.engine,
-      app: resolveTargetApp(name, declaredApp, projectRoot),
+      app,
       declaredApp,
+      ...(session === undefined ? {} : { session }),
       ...recordings(target, where),
     };
   });
+}
+
+/** Keys a target's `session` takes; anything else is refused rather than ignored. */
+const SESSION_KEYS: ReadonlySet<string> = new Set(['account', 'login', 'check']);
+
+/**
+ * Resolves the shared login a target declares. The app must be addressable
+ * and the engine must capture and restore state; the account must name a
+ * configured credential. The store key is the app's identity and the
+ * account, so a port a run assigned never changes it.
+ */
+function resolveSession(
+  where: string,
+  declared: unknown,
+  app: ResolvedApp,
+  engine: EngineHandle | undefined,
+  credentials: ReadonlyMap<string, ResolvedCredential>,
+): ResolvedTargetSession | undefined {
+  if (declared === undefined) return undefined;
+  if (!isRecord(declared)) {
+    throw new ConfigurationError('INVALID_CONFIG', `${where} session must be an object, got ${describeValue(declared)}`);
+  }
+  for (const key of Object.keys(declared)) {
+    if (!SESSION_KEYS.has(key)) {
+      throw new ConfigurationError(
+        'INVALID_CONFIG',
+        `${where} session has unknown key "${key}"; a session is { account, login, check }`,
+      );
+    }
+  }
+  const account = declared['account'];
+  const login = declared['login'];
+  const check = declared['check'];
+  if (typeof account !== 'string' || account.trim() === '') {
+    throw new ConfigurationError('INVALID_CONFIG', `${where} session account must be a non-empty string`);
+  }
+  if (typeof login !== 'function' || typeof check !== 'function') {
+    throw new ConfigurationError('INVALID_CONFIG', `${where} session login and check must be functions`);
+  }
+  if (app.base === undefined) {
+    throw new ConfigurationError(
+      'INVALID_CONFIG',
+      `${where} declares session but its app has no url; a shared login needs an addressable app`,
+    );
+  }
+  if (engine?.state?.capture === undefined || engine.state.restore === undefined) {
+    throw new ConfigurationError(
+      'UNSUPPORTED_CAPABILITY',
+      `${where} declares session, but engine ${engine?.name ?? 'none'} has no state capability to save and restore a login`,
+    );
+  }
+  const credential = credentials.get(account);
+  if (credential === undefined) {
+    const known = [...credentials.keys()];
+    throw new ConfigurationError(
+      'INVALID_CONFIG',
+      `${where} session account "${account}" is not configured in credentials${known.length === 0 ? '' : `; configured: ${known.join(', ')}`}`,
+    );
+  }
+  return {
+    account,
+    login: login as TargetSessionConfig['login'],
+    check: check as TargetSessionConfig['check'],
+    credential: credentialHandle(credential),
+    key: canonicalDigest({ app: app.identity ?? app.base.origin, environment: app.environment, account }),
+  };
 }
 
 /**

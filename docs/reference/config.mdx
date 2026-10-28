@@ -256,6 +256,7 @@ targets: [
 | [`platform`](#platform) | `string` | the engine's platform |
 | [`engine`](#engine) | `EngineHandle` | - |
 | [`app`](#the-app-under-test) | `TargetApp` | - |
+| [`session`](#session) | `{ account, login, check }` | - |
 | [`trace`](#trace) | `RecordingMode` | the config's `trace` |
 | [`video`](#video) | `RecordingMode` | the config's `video` |
 
@@ -300,6 +301,35 @@ engine: web({ browser: 'firefox' }),
 
 A target without an engine runs through agent tools only. A target with `app`
 and no engine is `INVALID_CONFIG`.
+
+#### `session`
+
+A login every test on the target starts with, kept between runs:
+
+```ts
+session: {
+  account: 'admin',
+  login: async ({ app, screen }, admin) => { /* fill the sign-in form */ },
+  check: async ({ app, screen }) => /* whether the session still works */ true,
+},
+```
+
+- `account` names a [`credentials`](#credentials) entry. The hooks receive the
+  target's `app`, `screen`, and `platform`, and the account's username and
+  password handle.
+- The runner restores the saved state and calls `check` before each test;
+  when it fails, `login` runs under an exclusive lock shared by every worker,
+  and the new state is saved only after `check` passes.
+- The state lives in `.e2e/sessions/shared/` under the project root, keyed by
+  the app identity (else its origin), its `environment`, and the account:
+  neither the target's name nor the run's ports change the key. It is
+  encrypted, and it is not part of [`output`](#output).
+- The target needs an app `url`, and its engine needs the state capability.
+  `web()` has it; the mobile engine does not yet, and a `session` there is
+  `UNSUPPORTED_CAPABILITY` at config load.
+- `test.setup` tests and tests naming a `session` skip it; a test can opt out
+  with [`sharedSession: false`](/reference/test#test). See
+  [Share one sign-in across runs](/authentication#share-one-sign-in-across-runs).
 
 ### The app under test
 
@@ -594,7 +624,7 @@ overrides it for one run.
 | `junit.xml`, `summary.md` | The `junit` and `markdown` reporters' files |
 | `ai-trace.json` | `--ai-trace` |
 | `results/` | One directory per test: its [trace page](/debugging#traces), `trace.md`, when the [`trace`](#trace) mode keeps one, and its screenshots, videos, downloads, and logs, one `attempt-<n>/` per attempt. Cleared once a run's tests start, so it holds the latest run's evidence and nothing its report no longer names. A `--last-failed` rerun keeps the files the report it reruns names and writes its own attempts under each test's `rerun-<n>/` |
-| `sessions/` | The run's encrypted `test.setup` sessions, deleted when it ends |
+| `sessions/` | The run's encrypted `test.setup` sessions, deleted when it ends. A target's [shared login](#session) is kept outside the output, at `.e2e/sessions/shared/` under the project root |
 | `videos/<session>/` | [`e2e mcp`](/reference/mcp#recording) session recordings |
 
 - A run that stops before its tests start writes nothing here. Such stops are

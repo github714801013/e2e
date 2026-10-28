@@ -160,6 +160,8 @@ These appear in terminal output and in the report as plain string codes.
 | `SESSION_INVALID` | A stored session failed authentication. Tampered or corrupt. | configuration | 2 |
 | `SESSION_UNAVAILABLE` | A test requires a session no selected setup test produced | configuration | 2 |
 | `SESSION_CONTRACT` | A setup test saved a session twice, saved an undeclared name, or finished without saving a declared one | test | 1 |
+| `SESSION_CHECK_FAILED` | A target's [shared login](/reference/config#session) `check` threw before a test. The run stops instead of failing every test that meets it | configuration | 2 |
+| `SESSION_LOGIN_FAILED` | A target's shared login `login` threw twice, or the session still failed `check` right after signing in. Nothing is saved, and the run stops | configuration | 2 |
 | `TEST_TIMEOUT` | The attempt exceeded the resolved test `timeout`. The body is not stopped: the harness operation it is in is cancelled, and its fixtures die with the attempt, so it cannot reach the next test. A test that blocks the event loop gets its worker killed once `cleanupTimeout` (at least 5 s) passes after the timeout. See [Hooks](/reference/test#hooks) | test | 1 |
 | `AUTH_TIMEOUT` | `e2e mcp --http`: a job waited two minutes for the run's shared authentication setup. The job ends `timed_out` and the run is stopped | test | 1 |
 | `JOB_TIMEOUT` | `e2e mcp --http`: a job did not finish within fifteen minutes of `run_test`, collection included. A job still collecting stops the run | test | 1 |
@@ -178,7 +180,8 @@ These appear in terminal output and in the report as plain string codes.
 | `TYPESCRIPT_COMPILER_UNAVAILABLE` | oxc, which compiles e2e's TypeScript, could not be loaded; the message gives the cause. Most often its native bindings for this platform (`@oxc-transform/binding-<platform>-<arch>`, `@oxc-parser/binding-<platform>-<arch>`) are not installed. npm leaves them out with `--omit=optional`, or when `package-lock.json` was written on another platform (npm/cli#4828). Install again without `--omit=optional`, or delete `package-lock.json` and `node_modules` and run `npm install` | infrastructure | 3 |
 | `ENGINE_FAILURE` | Any engine fault with no more specific mapping | infrastructure | 3 |
 | `WORKER_PROTOCOL` | A worker reported the wrong unit, an attempt overlapped a live attempt, `openHost` tried to acquire an engine instance another host owns, or `host.openSession` tried to reuse a closed host or overlap an opening, live, or closing session | infrastructure | 3 |
-| `SESSION_KEY_INVALID` | A worker received a session key that is not 32 bytes. Packaging or IPC fault. | infrastructure | 3 |
+| `SESSION_KEY_INVALID` | A session key that is not 32 bytes: the per-run key a worker received (packaging or IPC fault), or a shared login's `shared.key` under `.e2e/sessions/shared/`. Replace the file, which signs the project in again. | infrastructure | 3 |
+| `SESSION_LOCK_TIMEOUT` | A test waited over ten minutes for another worker to finish signing in to the same [shared login](/reference/config#session). The lock's holder crashed, or is still working. The run stops | infrastructure | 3 |
 | `REPORT_WRITE_FAILED` | `report.json` or `ai-trace.json` could not be written. Recorded as a run error; the in-memory outcome is still complete. A `junit.xml` that could not be written is a line on the `junit` reporter's stderr instead | infrastructure | 3 |
 | `EVALUATE_FAILED` | `browser.evaluate` threw inside the page (`@e2e-dev/web`) | test | 1 |
 | `INTERRUPTED` | A user or CI signal aborted the run. A test cut short by `--max-failures` or the time limit also ends with this code, and its message names the limit; that run exits 1, not 130 | interrupted | 130 |
