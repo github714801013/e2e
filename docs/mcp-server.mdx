@@ -176,7 +176,8 @@ target.
 
 `type_secret`, or a `fill` in `run_code`, fills a secret without showing it
 to the agent. Screenshots mask secure fields only, so a secret the app
-shows anywhere else is in them.
+shows anywhere else is in them. A secret whose name starts with `<target>.`
+belongs to that target; the session's opening text names the target it is on.
 
 <Warning>
 Videos from `start_recording` are not masked.

@@ -34,6 +34,7 @@ const defaultOptions: ResolvedTestOptions = {
   serial: false,
   trace: undefined,
   video: undefined,
+  sharedSession: true,
 };
 
 const EMPTY_APP: ResolvedTarget['app'] = {

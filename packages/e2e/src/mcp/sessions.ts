@@ -66,7 +66,7 @@ export class SessionRegistry<S extends NamedSession> {
    * open fails leaves once `open` has settled, after the host tore down what
    * it opened, so its claims hold until then.
    */
-  admit(open: (id: string) => Promise<string>): Promise<string> {
+  admit<T>(open: (id: string) => Promise<T>): Promise<T> {
     if (this.draining) return Promise.reject(new ConfigurationError('SESSION_OPEN', 'the server is shutting down; no session can open'));
     if (this.entries.size >= this.limit) return Promise.reject(this.limitReached());
     const id = uuidv7();

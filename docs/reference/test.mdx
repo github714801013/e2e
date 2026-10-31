@@ -320,6 +320,7 @@ blocked event loop hangs it.
 | [`platforms`](#platforms) | `readonly string[]` | - |
 | [`requires`](#requires) | `readonly Capability[]` | - |
 | [`session`](#session) | `string` | - |
+| [`sharedSession`](#sharedsession) | `boolean` | `true` |
 | [`agentContext`](#agentcontext) | `string` | - |
 | [`agent`](#agent) | `string \| readonly string[]` | the run's agents |
 | [`trace`](#trace) | `RecordingMode` | the run's |
@@ -424,6 +425,20 @@ test('sees the dashboard', { session: 'member' }, async ({ app }) => {});
 ```
 
 See [`test.setup`](#test-setup).
+
+#### `sharedSession`
+
+Whether the target's [shared login](/reference/config#session) is restored
+for this test. `false` skips the restore, the check, and any sign-in: the
+test starts signed out, for testing the login flow itself.
+
+```ts
+test('a bad password is refused', { sharedSession: false }, async ({ app, screen }) => {});
+```
+
+- Innermost wins, like every other option.
+- A test that names `session` never uses the shared login, and a
+  `test.setup` test never does either.
 
 #### `agentContext`
 

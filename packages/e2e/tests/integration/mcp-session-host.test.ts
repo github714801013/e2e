@@ -116,7 +116,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
   it('boots the engine headed when asked and headless otherwise', async () => {
     const fake = createFakeEngine();
     const headed = host(() => fake, { headed: true });
-    const text = await headed.open({});
+    const { text } = await headed.open({});
     expect(text).toContain('), headed;');
     expect(fake.inits[0]?.headed).toBe(true);
     await headed.close('done');
@@ -130,7 +130,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
   it("launches a device target's pinned app before the first observation", async () => {
     const fake = createFakeEngine({ device: true, scene: () => [{ id: 'greet', role: 'button', name: 'Greet' }] });
     const device = host(() => fake, { app: { bundleId: 'com.example.greeter' } });
-    const text = await device.open({});
+    const { text } = await device.open({});
     expect(text).toContain('App: com.example.greeter, launched fresh.');
     expect(text).toContain('button "Greet"');
     const methods = fake.operations.map((operation) => operation.method);
@@ -144,10 +144,10 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     const summaries: McpSessionSummary[] = [];
     const onSessionEnd = (summary: McpSessionSummary): void => void summaries.push(summary);
     const headless = host(() => fake, { headed: false, onSessionEnd });
-    expect(await headless.open({ headed: true })).toContain('), headed;');
+    expect((await headless.open({ headed: true })).text).toContain('), headed;');
     await headless.close('done');
     const headed = host(() => fake, { headed: true, onSessionEnd });
-    expect(await headed.open({ headed: false })).toContain('), headless;');
+    expect((await headed.open({ headed: false })).text).toContain('), headless;');
     await headed.close('done');
     expect(fake.inits.map((init) => init.headed)).toEqual([true, false]);
     expect(summaries.map((summary) => summary.headed)).toEqual([true, false]);
@@ -189,9 +189,9 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     const fakes = engines();
     const pair = host(fakes.next, { maxSessions: 2 });
     const opened = await Promise.all([pair.open({}), pair.open({})]);
-    const [first, second] = opened.map(sessionId) as [string, string];
+    const [first, second] = opened.map((entry) => sessionId(entry.text)) as [string, string];
     expect(first).not.toBe(second);
-    expect(opened[0]).toContain(`Pass session "${first}" to every tools, call, and close_session; with several sessions open, a call without it fails.`);
+    expect(opened[0]?.text).toContain(`Pass session "${first}" to every tools, call, and close_session; with several sessions open, a call without it fails.`);
     await expect(pair.open({})).rejects.toMatchObject({
       code: 'SESSION_OPEN',
       message: `no session slot is free (e2e mcp --max-sessions 2): ${first} on "kiosk", ${second} on "kiosk"; close_session one first`,
@@ -215,9 +215,9 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     const pair = host(engines({ onNavigate: () => (navigating.open(), held.promise) }, {}).next, { maxSessions: 2 });
     const first = pair.open({});
     await navigating.promise;
-    const second = sessionId(await pair.open({}));
+    const second = sessionId((await pair.open({})).text);
     held.open();
-    const firstId = sessionId(await first);
+    const firstId = sessionId((await first).text);
     expect(second).not.toBe(firstId);
     await pair.close('done', firstId);
     await pair.close('done', second);
@@ -226,13 +226,13 @@ describe('SessionHost', { timeout: 60_000 }, () => {
   it('refuses a second session on an engine instance another session drives', async () => {
     const fake = createFakeEngine();
     const shared = host(() => fake, { maxSessions: 2 });
-    const first = sessionId(await shared.open({}));
+    const first = sessionId((await shared.open({})).text);
     await expect(shared.open({})).rejects.toMatchObject({
       code: 'ENGINE_IN_USE',
       message: `target "kiosk" gets its engine instance from a package, so every session shares it, and session ${first} is driving it; create the engine in the config or a file it imports by path, or close_session ${first} first`,
     });
     await shared.close('done');
-    expect(await shared.open({})).toContain('button "Submit"');
+    expect((await shared.open({})).text).toContain('button "Submit"');
     await shared.close('done');
   });
 
@@ -257,7 +257,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     await expect(shared.open({})).rejects.toMatchObject({ code: 'ENGINE_IN_USE' });
     released.open();
     await expect(failing).rejects.toThrow(/screen unavailable/);
-    expect(await shared.open({})).toContain('button "Submit"');
+    expect((await shared.open({})).text).toContain('button "Submit"');
     await shared.close('done');
   });
 
@@ -273,7 +273,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     // The first two loads get the closing session's engine; the rest a fresh one each.
     const loads = [fake, fake];
     const single = host(() => loads.shift() ?? createFakeEngine(), { maxSessions: 2 });
-    const id = sessionId(await single.open({}));
+    const id = sessionId((await single.open({})).text);
     const closing = single.close('done', id);
     await disposing.promise;
     const again = single.close('again', id);
@@ -283,19 +283,19 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     released.open();
     expect(await closing).toContain(`Session ${id} closed (done)`);
     expect(await again).toBe(await closing);
-    expect(await single.open({})).toContain('button "Submit"');
+    expect((await single.open({})).text).toContain('button "Submit"');
     await single.close('done');
   });
 
   it('refuses a session on another config while one is open', async () => {
     const mixed = host(engines().next, { maxSessions: 2 });
-    const first = sessionId(await mixed.open({}));
+    const first = sessionId((await mixed.open({})).text);
     await expect(mixed.open({ config: 'other.config.ts' })).rejects.toMatchObject({
       code: 'CONFIG_IN_USE',
       message: `session ${first} is open on config ${path.join(dir, 'e2e.config.ts')}; sessions open at once share one config, because credentials and secrets resolve process-wide; open this one on that config, or close every session on it first`,
     });
     await mixed.close('done');
-    expect(await mixed.open({ config: 'other.config.ts' })).toContain(`config ${path.join(dir, 'other.config.ts')}`);
+    expect((await mixed.open({ config: 'other.config.ts' })).text).toContain(`config ${path.join(dir, 'other.config.ts')}`);
     await mixed.close('done');
   });
 
@@ -309,7 +309,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
         if (configPath.endsWith('other.config.ts')) secrets.get('OTHER_ONLY');
       },
     });
-    const first = sessionId(await mixed.open({}));
+    const first = sessionId((await mixed.open({})).text);
     await expect(mixed.open({ config: 'other.config.ts' })).rejects.toMatchObject({
       code: 'CONFIG_IN_USE',
       message: expect.stringContaining(`session ${first} is open on config ${path.join(dir, 'e2e.config.ts')}`),
@@ -323,7 +323,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     const url = `http://127.0.0.1:${port}`;
     writeStartupScripts(dir);
     const shared = host(engines().next, { maxSessions: 3, app: { url, command: { executable: process.execPath, args: ['server.cjs', String(port)] } } });
-    const [first, second] = (await Promise.all([shared.open({}), shared.open({})])).map(sessionId) as [string, string];
+    const [first, second] = (await Promise.all([shared.open({}), shared.open({})])).map((entry) => sessionId(entry.text)) as [string, string];
     expect(startupLog(dir)).toBe('app\n');
     await shared.close('done', first);
     expect(await (await fetch(url)).text()).toBe('ready');
@@ -379,8 +379,8 @@ describe('SessionHost', { timeout: 60_000 }, () => {
 
   it('keeps the credential registry while a session is still open after the newer one closes', async () => {
     const both = host(engines().next, { maxSessions: 2 });
-    const older = sessionId(await both.open({}));
-    const newer = sessionId(await both.open({}));
+    const older = sessionId((await both.open({})).text);
+    const newer = sessionId((await both.open({})).text);
     await both.close('done', newer);
     expect(credentials.user('admin').username).toBe('admin');
     await both.close('done', older);
@@ -399,7 +399,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     expect(flaky.isOpen).toBe(false);
     expect(fake.stats()).toMatchObject({ attemptsStarted: 1, attemptsEnded: 1, disposes: 1 });
     broken = false;
-    const text = await flaky.open({});
+    const { text } = await flaky.open({});
     expect(text).toContain('button "Submit"');
     await flaky.close('done');
     expect(fake.stats()).toMatchObject({ attemptsStarted: 2, attemptsEnded: 2, disposes: 2 });
@@ -448,7 +448,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     const fake = createFakeEngine({ video: true });
     // The config's video mode is for runs: the session must not record from launch.
     const recording = host(() => fake, { video: 'on' });
-    const opened = await recording.open({});
+    const { text: opened } = await recording.open({});
     expect(opened).toMatch(/^- start_recording \{name\?\}: Start recording a video of the app, for a person to watch: .*\.$/m);
     expect(opened).toMatch(/^- stop_recording: Stop the running recording and save it: .*\.$/m);
     expect(fake.operations.map((operation) => operation.method)).not.toContain('artifacts.startVideo');
@@ -493,7 +493,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
       hold: defineTool({ description: 'Hold the session queue.', inputSchema: z.object({}), execute: async () => { started.open(); await released.promise; return 'released'; } }, { mutates: false }),
       mutate: defineTool({ description: 'Mark a mutation.', inputSchema: z.object({}), execute: async () => { mutated = true; return 'mutated'; } }, { mutates: true }),
     } });
-    const id = sessionId(await counted.open({}));
+    const id = sessionId((await counted.open({})).text);
     const first = counted.call(id, 'hold', {}, { signal: new AbortController().signal });
     try {
       await started.promise;
@@ -516,7 +516,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     const summaries: McpSessionSummary[] = [];
     const counted = host(engines().next, { idleMs: 300, onSessionEnd: (summary) => summaries.push(summary) });
     const signal = new AbortController().signal;
-    const id = sessionId(await counted.open({}));
+    const id = sessionId((await counted.open({})).text);
     await counted.call(id, 'observe', {}, { signal });
     const missed = await counted.call(id, 'tap', { target: 'n999' }, { signal });
     expect(missed.isError).toBe(true);
@@ -559,7 +559,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     const extra = { signal: new AbortController().signal };
     const text = (result: { content: { type: string; text?: string }[] }) => result.content.map((part) => part.text ?? '').join('\n');
     const session = host(engines().next, { tools: { echo, leak } });
-    const id = sessionId(await session.open({}));
+    const id = sessionId((await session.open({})).text);
 
     const echoed = await session.call(id, 'echo', {}, extra);
     expect(text(echoed)).toBe('pw=<secret:admin.password>');
@@ -568,6 +568,20 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     expect(text(thrown)).toContain('denied <secret:admin.password>');
     expect(text(thrown)).not.toContain('kiosk-pw');
     await session.close('done', id);
+  });
+
+  it('redacts a secret from the structured content of open_session', async () => {
+    const session = host(() => createFakeEngine(), {
+      app: { url: 'http://127.0.0.1:4599/structured-secret-1' },
+      secrets: { siteToken: 'structured-secret-1' },
+    });
+    const [open] = session.toolSpecs();
+    const result = await open!.call({}, { signal: new AbortController().signal });
+    expect(result.isError).not.toBe(true);
+    const structured = result.structuredContent as { appUrl?: unknown } | undefined;
+    expect(String(structured?.appUrl)).toContain('<secret:siteToken>');
+    expect(JSON.stringify(result)).not.toContain('structured-secret-1');
+    await session.closeAll('done');
   });
 
   it('counts an action that failed and then could not look at the screen as one failed call', async () => {
@@ -579,7 +593,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     });
     const summaries: McpSessionSummary[] = [];
     const counted = host(() => fake, { onSessionEnd: (summary) => summaries.push(summary) });
-    const id = sessionId(await counted.open({}));
+    const id = sessionId((await counted.open({})).text);
     broken = true;
     const result = await counted.call(id, 'tap', { target: 'n999' }, { signal: new AbortController().signal });
     expect(result.isError).toBe(true);
