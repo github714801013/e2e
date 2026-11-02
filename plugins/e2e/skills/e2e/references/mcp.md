@@ -81,8 +81,10 @@ past the limit closes the group's least recently active session.
 A token entry may limit `tools`; it also gains three script tools over HTTP:
 `list_test_scripts` (collect the project, grouped by file), `get_test_script`,
 and `save_test_script` (atomic, at most 256 KiB; creates missing parent
-directories). Paths stay under `--test-root` (default the working directory)
-and must name `.e2e.ts` files.
+directories; runs a collection on the candidate and refuses content that does
+not collect, keeping the old file).
+Paths stay under `--test-root` (default the working directory) and must name
+`.e2e.ts` files.
 `list_test_scripts` and `get_test_script` are in the default set;
 `save_test_script` must be named. A failed collection reports the exit status
 only: the child's stderr is project output and is never returned. Four job tools, also granted by name, run

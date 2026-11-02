@@ -8,7 +8,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Tool } from '@modelcontextprotocol/server';
 import { ConfigurationError, errorMessage, InfrastructureError, isE2EError } from '../../internal/errors.ts';
@@ -20,6 +20,9 @@ const SCRIPT_EXTENSION = '.e2e.ts';
 
 /** The per-file limit the specification sets. */
 const MAX_SCRIPT_BYTES = 256 * 1024;
+
+/** A candidate a save left behind: `<name>.<uuid>.tmp.e2e.ts`. */
+const CANDIDATE_NAME = /\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp\.e2e\.ts$/u;
 
 const MAX_PATH_CHARS = 512;
 const MAX_TEXT_ARG_CHARS = 200;
@@ -110,7 +113,7 @@ const GET_SCHEMA: Tool = {
 const SAVE_SCHEMA: Tool = {
   name: 'save_test_script',
   description:
-    'Atomically write one test script under the configured test root, creating missing parent directories. Refuses a path outside the root, a name not ending in .e2e.ts, and an existing file unless overwrite is true.',
+    'Atomically write one test script under the configured test root, creating missing parent directories. The candidate is collected first, which runs its top-level code, and content the runner cannot collect is refused. Also refuses a path outside the root, a name not ending in .e2e.ts, and an existing file unless overwrite is true; a refusal leaves the existing file untouched.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -147,9 +150,9 @@ interface ResolvedScript {
 
 /** Serves the script tools for one gateway; every MCP session shares it. */
 export class ScriptService {
-  /** Bumped by every save, so a collection that overlapped one is retried. */
-  private epoch = 0;
   private saveChain: Promise<unknown> = Promise.resolve();
+  /** One collection at a time, a save's validation child included. */
+  private collectChain: Promise<unknown> = Promise.resolve();
 
   private constructor(
     private readonly root: string,
@@ -168,6 +171,9 @@ export class ScriptService {
         `the test root ${JSON.stringify(options.root)} is not a readable directory: ${errorMessage(cause)}`,
       );
     }
+    // A candidate a killed save left behind is discovered and imported by
+    // every later collection, which is the failure this service prevents.
+    await sweepCandidates(root);
     // The collection child runs with the test root as its working directory,
     // so anything it is given by path must not be resolved against ours.
     return new ScriptService(root, {
@@ -186,21 +192,15 @@ export class ScriptService {
         return textResult(JSON.stringify(await this.getScript(parseGetArgs(args)), null, 2));
       case 'save_test_script': {
         const input = parseSaveArgs(args);
-        return textResult(JSON.stringify(await this.saveScript(input.path, input.content, input.overwrite), null, 2));
+        return textResult(JSON.stringify(await this.saveScript(input.path, input.content, input.overwrite, signal), null, 2));
       }
     }
   }
 
   /** Collects the project in a child and groups the pairs by file. */
   async listScripts(input: { prefix?: string | undefined; keyword?: string | undefined; limit?: number | undefined }, signal: AbortSignal): Promise<ListScriptsResult> {
-    const before = this.epoch;
-    const { projectRoot, pairs } = await this.collect(signal);
-    if (this.epoch !== before) {
-      throw new InfrastructureError(
-        'SCRIPT_CHANGED',
-        'a test script was saved while the project was collected; call list_test_scripts again',
-      );
-    }
+    // The lock keeps a save's candidate out of the collected tree.
+    const { projectRoot, pairs } = await this.withCollectionLock(() => this.collect(signal));
     const prefix = input.prefix === undefined ? undefined : normalizePrefix(input.prefix);
     const keyword = input.keyword?.toLowerCase();
     // One filesystem check per file, not per test.
@@ -264,8 +264,12 @@ export class ScriptService {
     return { path: target.relative, content };
   }
 
-  /** Writes one script through a temporary file in the same directory. */
-  async saveScript(input: string, content: string, overwrite: boolean): Promise<SaveScriptResult> {
+  /**
+   * Writes one script through a temporary file in the same directory, after
+   * proving the file collects: one save that cannot import would otherwise
+   * fail every later `list_test_scripts` for the whole project.
+   */
+  async saveScript(input: string, content: string, overwrite: boolean, signal?: AbortSignal): Promise<SaveScriptResult> {
     const bytes = Buffer.byteLength(content, 'utf8');
     if (bytes > MAX_SCRIPT_BYTES) throw invalid(`save_test_script: content is ${bytes} bytes; the limit is ${MAX_SCRIPT_BYTES}`);
     // The lock is taken before the first await so two saves issued in one turn
@@ -284,18 +288,48 @@ export class ScriptService {
           `save_test_script: ${target.relative} exists; pass overwrite: true to replace it`,
         );
       }
-      const temporary = path.join(path.dirname(target.absolute), `.${path.basename(target.absolute)}.${randomUUID()}.tmp`);
+      // The candidate must keep the .e2e.ts extension to be collectable, and a
+      // dot-prefixed name is skipped by discovery even when named explicitly.
+      // shortcut: a collection outside this service (a run_test job or a hand
+      // run) can import the candidate for the validation window; coordinate
+      // across processes only if saves and runs start to overlap in practice.
+      const temporary = path.join(path.dirname(target.absolute), `${path.basename(target.absolute)}.${randomUUID()}.tmp${SCRIPT_EXTENSION}`);
       try {
-        await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-        await rename(temporary, target.absolute);
+        await this.withCollectionLock(async () => {
+          await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+          await this.validateCandidate(temporary, target.relative, signal);
+          await rename(temporary, target.absolute);
+        });
       } catch (cause) {
         await rm(temporary, { force: true }).catch(() => undefined);
         if (isE2EError(cause)) throw cause;
         throw scriptIo('save_test_script', cause);
       }
-      this.epoch += 1;
       return { path: target.relative, bytes, created: existing === undefined };
     });
+  }
+
+  /**
+   * Collects the project with the candidate selected. The candidate lives in
+   * the target's directory, so relative imports resolve as they will after
+   * the rename; an import failure in an unselected file is tolerated by the
+   * collection itself. The child's stderr is project output and is never
+   * returned; the error names the file and exit.
+   */
+  private async validateCandidate(temporary: string, relative: string, signal: AbortSignal | undefined): Promise<void> {
+    const outcome = await this.collectChild(this.collectArgs(temporary), signal);
+    if (signal?.aborted === true) throw new InfrastructureError('CANCELLED', 'save_test_script was cancelled');
+    if (outcome.timedOut || outcome.overflow || outcome.code !== 0) {
+      const reason = outcome.timedOut
+        ? `no result within ${COLLECT_TIMEOUT_MS} ms`
+        : outcome.overflow
+          ? `output over ${COLLECT_STDOUT_BYTES} bytes`
+          : `exit ${String(outcome.code)}`;
+      throw new ConfigurationError(
+        'COLLECTION_ERROR',
+        `save_test_script: ${relative} does not collect (${reason}); the file was not saved`,
+      );
+    }
   }
 
   /**
@@ -367,11 +401,17 @@ export class ScriptService {
     }
   }
 
-  /** Collects through the built CLI, bounded in time and output. */
-  private async collect(signal: AbortSignal): Promise<CollectedSelection> {
+  /** The collection command; a positional narrows it to one file. */
+  private collectArgs(positional?: string): string[] {
     const args = [this.options.cliEntry, 'list', '--reporter', 'json', '--pass-with-no-tests'];
     if (this.options.configPath !== undefined) args.push('--config', this.options.configPath);
-    const outcome = await this.collectChild(args, signal);
+    if (positional !== undefined) args.push(positional);
+    return args;
+  }
+
+  /** Collects through the built CLI, bounded in time and output. */
+  private async collect(signal: AbortSignal): Promise<CollectedSelection> {
+    const outcome = await this.collectChild(this.collectArgs(), signal);
     if (signal.aborted) throw new InfrastructureError('CANCELLED', 'list_test_scripts was cancelled');
     if (outcome.timedOut) throw new ConfigurationError('COLLECTION_ERROR', `list_test_scripts: collection did not finish within ${COLLECT_TIMEOUT_MS} ms`);
     if (outcome.overflow) throw new ConfigurationError('COLLECTION_ERROR', `list_test_scripts: collection output exceeded ${COLLECT_STDOUT_BYTES} bytes`);
@@ -419,7 +459,7 @@ export class ScriptService {
    * inherited stdio pipes open, which would pin the session's in-flight count
    * forever.
    */
-  private collectChild(args: readonly string[], signal: AbortSignal): Promise<CollectOutcome> {
+  private collectChild(args: readonly string[], signal: AbortSignal | undefined): Promise<CollectOutcome> {
     return new Promise<CollectOutcome>((resolve, reject) => {
       const child = spawn(process.execPath, [...args], {
         cwd: this.root,
@@ -436,7 +476,7 @@ export class ScriptService {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        signal.removeEventListener('abort', onAbort);
+        signal?.removeEventListener('abort', onAbort);
         child.stdout.destroy();
         child.stderr.destroy();
         this.options.log(`collection child exited (${String(code)})`);
@@ -459,10 +499,10 @@ export class ScriptService {
         stop();
         finish(null);
       };
-      signal.addEventListener('abort', onAbort, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
       // An abort that landed before the listener existed would otherwise
       // leave the child running to its timeout.
-      if (signal.aborted) onAbort();
+      if (signal?.aborted === true) onAbort();
       child.stdout.on('data', (chunk: Buffer) => {
         if (settled) return;
         stdoutBytes += chunk.length;
@@ -481,7 +521,7 @@ export class ScriptService {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        signal.removeEventListener('abort', onAbort);
+        signal?.removeEventListener('abort', onAbort);
         reject(scriptIo('start collection', cause));
       });
       child.once('close', (code) => finish(code));
@@ -497,6 +537,35 @@ export class ScriptService {
     const next = this.saveChain.then(action, action);
     this.saveChain = next.catch(() => undefined);
     return next;
+  }
+
+  /**
+   * Serializes the write-validate-rename window of a save with every listing:
+   * a candidate lives inside the test root until it is validated, so no
+   * listing may collect the project while it is there, and no save may add
+   * one while a listing collects.
+   */
+  private withCollectionLock<T>(action: () => Promise<T>): Promise<T> {
+    const next = this.collectChain.then(action, action);
+    this.collectChain = next.catch(() => undefined);
+    return next;
+  }
+}
+
+/**
+ * Deletes candidates a killed save left behind. One is a complete .e2e.ts
+ * file in the tree, so every later collection would import it.
+ */
+async function sweepCandidates(directory: string): Promise<void> {
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => undefined);
+  if (entries === undefined) return;
+  for (const entry of entries) {
+    const item = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name !== 'node_modules' && !entry.name.startsWith('.')) await sweepCandidates(item);
+    } else if (entry.isFile() && CANDIDATE_NAME.test(entry.name)) {
+      await rm(item, { force: true }).catch(() => undefined);
+    }
   }
 }
 

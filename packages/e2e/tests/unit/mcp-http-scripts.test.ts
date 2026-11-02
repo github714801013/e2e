@@ -25,7 +25,7 @@ afterEach(() => {
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function service(dir: string, cliEntry = path.join(dir, 'missing-cli.mjs')): Promise<ScriptService> {
+function service(dir: string, cliEntry = collecting(dir)): Promise<ScriptService> {
   return ScriptService.create({ root: dir, cliEntry, env: process.env, log: () => undefined });
 }
 
@@ -279,12 +279,12 @@ describe('ScriptService list', () => {
     expect((await rejection(shapeless.listScripts({}, signal))).code).toBe('COLLECTION_ERROR');
   });
 
-  it('reports a save that lands while collection runs as SCRIPT_CHANGED', async () => {
+  it('waits for a running collection before saving, so its candidate is never collected', async () => {
     const dir = root();
-    mkdirSync(path.join(dir, 'tests'));
+    writeFiles(dir, 'tests/forms.e2e.ts', 'tests/login.e2e.ts');
     const started = path.join(dir, 'collecting.txt');
     const release = path.join(dir, 'release.txt');
-    // The child finishes only after the test saved, so the race is fixed.
+    // The child finishes only when the test lets it, so the order is fixed.
     const cli = fakeCli(
       dir,
       `import { existsSync, writeFileSync } from 'node:fs';
@@ -296,9 +296,56 @@ console.log(${JSON.stringify(JSON.stringify(collected(dir)))});
     const scripts = await service(dir, cli);
     const pending = scripts.listScripts({}, new AbortController().signal);
     await expect.poll(() => existsSync(started), { timeout: 10_000 }).toBe(true);
-    await scripts.saveScript('tests/during.e2e.ts', '// fixture', false);
+    let saved = false;
+    const saving = scripts.saveScript('tests/during.e2e.ts', '// fixture', false).then(() => {
+      saved = true;
+    });
+    // The save is queued behind the collection, so no candidate exists yet.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(saved).toBe(false);
+    expect(existsSync(path.join(dir, 'tests', 'during.e2e.ts'))).toBe(false);
+    expect(readdirSync(path.join(dir, 'tests')).toSorted()).toEqual(['forms.e2e.ts', 'login.e2e.ts']);
     writeFileSync(release, 'go');
-    expect((await rejection(pending)).code).toBe('SCRIPT_CHANGED');
+    await saving;
+    expect((await pending).scripts.map((script) => script.path)).toEqual(['tests/forms.e2e.ts', 'tests/login.e2e.ts']);
+    expect(readFileSync(path.join(dir, 'tests', 'during.e2e.ts'), 'utf8')).toBe('// fixture');
+  });
+
+  it('refuses a script the runner cannot collect and keeps the old file', async () => {
+    const dir = root();
+    mkdirSync(path.join(dir, 'tests'));
+    writeFileSync(path.join(dir, 'tests', 'bad.e2e.ts'), 'old');
+    // A candidate is the only call the collection child sees with a .tmp name;
+    // it fails the way a real import failure does.
+    const cli = fakeCli(
+      dir,
+      `if ((process.argv.at(-1) ?? '').includes('.tmp.e2e.ts')) { console.error('boom'); process.exitCode = 2; }
+else console.log(${JSON.stringify(JSON.stringify(collected(dir)))});`,
+    );
+    const scripts = await service(dir, cli);
+
+    const error = await rejection(scripts.saveScript('tests/bad.e2e.ts', 'broken', true));
+    expect(error.code).toBe('COLLECTION_ERROR');
+    expect(error.message).toContain('tests/bad.e2e.ts');
+    expect(error.message).toContain('exit 2');
+    expect(error.message).not.toContain('boom');
+    expect(readFileSync(path.join(dir, 'tests', 'bad.e2e.ts'), 'utf8')).toBe('old');
+    // The candidate is removed, so the failed save leaves no trace.
+    expect(readdirSync(path.join(dir, 'tests'))).toEqual(['bad.e2e.ts']);
+  });
+
+  it('removes a candidate a killed save left behind when the service starts', async () => {
+    const dir = root();
+    mkdirSync(path.join(dir, 'tests'));
+    const leftover = path.join(dir, 'tests', 'left.e2e.ts.00000000-0000-4000-8000-000000000000.tmp.e2e.ts');
+    const lookalike = path.join(dir, 'tests', 'left.e2e.ts.tmp.e2e.ts');
+    writeFileSync(leftover, 'broken');
+    writeFileSync(lookalike, 'not ours');
+
+    await service(dir, path.join(dir, 'missing-cli.mjs'));
+
+    expect(existsSync(leftover)).toBe(false);
+    expect(readFileSync(lookalike, 'utf8')).toBe('not ours');
   });
 
   it('does not return collection stderr, which project code controls', async () => {
@@ -332,7 +379,9 @@ console.log(${JSON.stringify(JSON.stringify(collected(dir)))});
     const file = path.join(dir, 'file.txt');
     writeFileSync(file, 'x');
 
-    expect((await rejection(service(file))).code).toBe('INVALID_ARGUMENT');
-    expect((await rejection(service(path.join(dir, 'missing')))).code).toBe('INVALID_ARGUMENT');
+    // The root check runs before the CLI is ever used, so it need not exist.
+    const cli = path.join(dir, 'missing-cli.mjs');
+    expect((await rejection(service(file, cli))).code).toBe('INVALID_ARGUMENT');
+    expect((await rejection(service(path.join(dir, 'missing'), cli))).code).toBe('INVALID_ARGUMENT');
   });
 });

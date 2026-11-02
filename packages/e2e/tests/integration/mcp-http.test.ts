@@ -5,7 +5,7 @@
  * binds each session to the principal that opened it.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { request, type IncomingHttpHeaders } from 'node:http';
 import path from 'node:path';
@@ -223,6 +223,23 @@ test('added passes', async () => {
       const exists = await invoke(client, 'save_test_script', { path: 'tests/added.e2e.ts', content });
       expect(exists.isError).toBe(true);
       expect(exists.text).toContain('SCRIPT_EXISTS');
+
+      // A save that would break collection is refused and the old file stays,
+      // so one bad save cannot fail every later list for the whole project.
+      const broken = `import { test } from 'e2e';
+
+test.use({ viewport: { width: 1600, height: 1000 } });
+
+test('never collects', async () => {});
+`;
+      const refused = await invoke(client, 'save_test_script', { path: 'tests/added.e2e.ts', content: broken, overwrite: true });
+      expect(refused.isError).toBe(true);
+      expect(refused.text).toContain('COLLECTION_ERROR');
+      expect(refused.text).toContain('tests/added.e2e.ts');
+      expect(readFileSync(path.join(project.dir, 'tests', 'added.e2e.ts'), 'utf8')).toBe(content);
+      expect(readdirSync(path.join(project.dir, 'tests')).some((name) => name.includes('.tmp'))).toBe(false);
+      const stillListed = await invoke(client, 'list_test_scripts', { prefix: 'tests/added' });
+      expect(stillListed.isError, stillListed.text).toBe(false);
 
       const escaped = await invoke(client, 'save_test_script', { path: '../escaped.e2e.ts', content });
       expect(escaped.isError).toBe(true);

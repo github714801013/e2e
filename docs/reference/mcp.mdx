@@ -712,12 +712,16 @@ directories under the root; a read whose parent is missing is
   `--test-root` are listed.
 - `save_test_script` writes at most 256 KiB through a temporary file in the
   same directory and a rename, so a reader sees the old file or the new one,
-  never half of one. It refuses an existing file unless `overwrite` is true
-  (`SCRIPT_EXISTS`).
-- Saves are serialized. A save that lands while
-  `list_test_scripts` is collecting fails that call with `SCRIPT_CHANGED`;
-  call `list_test_scripts` again, so a listing never reports a half-changed
-  project.
+  never half of one. Before the rename it runs a collection with the
+  candidate selected, so a save takes as long as a listing; content that does
+  not collect is `COLLECTION_ERROR` naming the file, and the existing file
+  stays: one save that cannot import would otherwise fail every later
+  `list_test_scripts` for the whole project. A candidate a killed server left
+  behind is removed at startup. It refuses an existing file unless `overwrite`
+  is true (`SCRIPT_EXISTS`).
+- Saves and collections take turns: a save waits for a running collection,
+  and a collection waits for a running save, so no listing reads another
+  call's candidate file.
 - A token that grants only script tools never starts a native `e2e mcp` child
   and has no guide resources.
 
