@@ -94,6 +94,7 @@ or a blocked agent verdict still fails the test.
 | `platforms` | unset | Only targets with these platforms, e.g. `['ios']`. |
 | `requires` | `[]` | Engine capabilities, e.g. `['browser']`; missing ones skip the test at selection rather than failing it with `UNSUPPORTED_CAPABILITY`. |
 | `session` | unset | Restore state saved by a setup test. |
+| `sharedSession` | `true` | Use the target's shared login (topic `setup`, Shared sign-in). Set `false` for a test that signs in itself; a setup test and a test naming a `session` never use it. |
 | `agentContext` | unset | Extra context for `agent.*` calls in this test or group. |
 | `agent` | the run's agent | A configured name (`agents.<name>`) or a list run once per agent; `--agent` narrows the list, a setup test takes one name. Innermost wins; `agent.act(..., { agent })` names another for one call. |
 | `trace`, `video` | the target's | `'off'`, `'on'`, `'retain-on-failure'`, `'on-first-retry'`, `'on-all-retries'`: whether the test keeps a trace page, which attempts record video. Innermost wins over `--trace` / `--video`, the target, and the config; video where the engine cannot record is `UNSUPPORTED_ARTIFACT` for the run. |
@@ -366,6 +367,17 @@ test('the dashboard opens directly', { session: 'admin' }, async ({ app, screen 
   after a secret fill too. A generic secret in a plain input, or a value the
   app shows anywhere else (a show-password toggle, a toast), is in the image
   and reaches the model provider: use test credentials.
+
+- A target declaring `session` signs in by itself and keeps the state between
+  runs: the runner restores and checks it before `beforeEach`, so every test
+  starts signed in with no setup test and no option. `sharedSession: false`
+  opts one test out; setup tests and tests naming a `session` are always
+  outside it. The runner stops the run (`SESSION_LOGIN_FAILED`,
+  `SESSION_CHECK_FAILED`) when the target's `login` or `check` fails. Topic
+  `setup`, Shared sign-in.
+- A secret fill doesn't turn screenshots off: the model's screenshots, the
+  pixel tools, and artifact screenshots (`app.screenshot()`, assertion,
+  failure) get the same masked images before and after a fill.
 - Credentials live in the config, values in the environment:
 
 ```ts

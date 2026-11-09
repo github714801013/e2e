@@ -402,8 +402,9 @@ export interface EnginePrepareInfo {
    * the run's worker cap, the engine's declared `workers`, and the work units
    * selected for the target, whichever is smallest; `0` when nothing runs on
    * it while another target has work. A run with nothing to run prepares no
-   * target. Provision for exactly these slots (boot that many devices of a
-   * pool); `init` then finds them ready.
+   * target. A dynamic run uses the smaller of the run's cap and the declared
+   * `workers`, because later jobs may add work. Provision for exactly these
+   * slots (boot that many devices of a pool); `init` then finds them ready.
    */
   readonly slots: number;
   /**

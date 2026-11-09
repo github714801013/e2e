@@ -48,7 +48,9 @@ import {
   type TestFilterContext,
   type Unique,
   type CacheStore,
+  type Credential,
   type ExecutorObservation,
+  type SessionFixtures,
   type ValueExpectation,
   type StandardSchemaV1,
   afterAll,
@@ -107,6 +109,8 @@ import {
   type ListOptions,
   openHost,
   run,
+  runDynamic,
+  type DynamicRun,
   type RunEventSink,
   type RunOptions,
   type RunResult,
@@ -199,6 +203,15 @@ customExecutorObservation.keyboardVisible satisfies boolean | undefined;
 ({ targets, maxDuration: 900_000 }) satisfies E2EConfig;
 ({ targets, cache: { mode: 'read-only', store: remoteStore, dir: 'shared-cache' } }) satisfies E2EConfig;
 ({ targets: [{ platform: 'ios' }] }) satisfies E2EConfig;
+// A target carries at most one shared login: an account, a sign-in, and a check.
+declare const sharedLogin: NonNullable<Target['session']>;
+sharedLogin.account satisfies string;
+sharedLogin.login satisfies (fixtures: SessionFixtures, credential: Credential) => Promise<void>;
+sharedLogin.check satisfies (fixtures: SessionFixtures, credential: Credential) => Promise<boolean>;
+// @ts-expect-error check answers whether the state still works, not a replacement
+({ ...sharedLogin, check: async () => 'yes' }) satisfies Target['session'];
+// @ts-expect-error login is what signs in; check alone cannot
+({ account: 'admin', check: async () => true }) satisfies Target['session'];
 // @ts-expect-error specVersion is gone; the runner version is the format version
 ({ targets, specVersion: '0.1' }) satisfies E2EConfig;
 // A target inherits its platform from the engine; the resolver rejects one with neither.
@@ -699,6 +712,9 @@ test.extend<{ device: unknown }>()('types a device', async ({ device }) => { dev
 // A test, a group, and a call each pin a configured agent by name.
 test('as the buyer', { agent: 'buyer' }, async () => {});
 test('traced on retries', { trace: 'on-all-retries', video: 'retain-on-failure' }, async () => {});
+test('signed out for the login flow', { sharedSession: false }, async () => {});
+// @ts-expect-error sharedSession is a boolean
+test('unsigned', { sharedSession: 'no' }, async () => {});
 test.describe('untraced', { trace: 'off' }, () => {});
 // @ts-expect-error a test's trace is a mode
 test('traced', { trace: 'all' }, async () => {});
@@ -909,6 +925,20 @@ void explore({ notice: () => {} });
 void explore({ forceSignal: new AbortController().signal });
 // @ts-expect-error outcomes do not expose live resolved configuration
 exploreResult.config;
+
+/** 动态入口仅支持固定目标和文件配置，提交不能改变并发。 */
+declare const dynamicRun: DynamicRun;
+void (runDynamic({ target: 'web', config: 'e2e.config.ts' }) satisfies DynamicRun);
+void (runDynamic({ target: 'web', maxWorkers: 2 }) satisfies DynamicRun);
+void (dynamicRun.result satisfies Promise<RunResult>);
+void dynamicRun.submit({ jobId: 'one', files: ['tests/a.e2e.ts'] });
+void dynamicRun.seal();
+// @ts-expect-error 动态执行必须指定固定目标
+void runDynamic({});
+// @ts-expect-error 动态执行使用文件配置
+void runDynamic({ target: 'web', config: { targets } });
+// @ts-expect-error 作业不能设置 Worker 上限
+void dynamicRun.submit({ jobId: 'one', files: ['tests/a.e2e.ts'], workers: 2 });
 
 // `e2e/runner` lists a selection in process. `config` is a path or a config value; `grep` is RegExp[].
 void list({

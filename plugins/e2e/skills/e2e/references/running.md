@@ -80,12 +80,12 @@ prints one line per test-target pair, `file › title [target] #tag`, skipped
 pairs ending in ` (skipped: <reason>)`, and starts no app, engine, or
 worker. With `--changed-since`, the configured filters run as for `run`; a
 pair one left out ends in ` (left out by <filter>: <reason>)`. `--reporter json` prints
-`{ "pairs": [...] }`, naming a skip or left-out reason `reason` and the
-filter that left a pair out `filter`.
+`{ "projectRoot": "<absolute dir>", "pairs": [...] }`, naming a skip or left-out reason `reason` and the
+filter that left a pair out `filter`; every `file` is relative to `projectRoot`.
 
-`import { list } from 'e2e/runner'` returns that selection plus the pairs a
-filter removed, positional arguments that matched no file, and the selected
-target names.
+`import { list } from 'e2e/runner'` returns that selection plus `projectRoot`,
+the pairs a filter removed, positional arguments that matched no file, and the
+selected target names.
 
 ```bash
 npx e2e list tests/signup.e2e.ts --tag smoke --reporter json
@@ -108,6 +108,10 @@ record of the steps, findings, and why it ended. A goal or budget out of
 range, an unknown target or agent, or an agent with no model rejects before
 it starts (`INVALID_CONFIG`, `UNKNOWN_TARGET`, `MODEL_UNAVAILABLE`); branch
 on `isE2EError(error)` and `error.code`. It shares `run`'s reservation.
+
+`runDynamic({ target, config? })` starts a run from a file config that keeps accepting jobs.
+`submit({ jobId, files })` returns the job's result ids, `seal()` stops accepting, and `result` waits for cleanup and returns the combined report.
+An authentication setup runs once per run, repeat submissions execute independently, and workers start on demand under the configured cap.
 
 With a `package.json` script `"test:e2e": "e2e run"`, pnpm forwards `--`
 literally: `pnpm test:e2e -- --headed` reaches e2e as `run -- --headed` and

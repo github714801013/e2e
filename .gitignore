@@ -11,6 +11,7 @@ dist/
 **/.e2e/summary.md
 **/.e2e/logs/
 **/.e2e/videos/
+**/.e2e/http-jobs/
 # Left in older checkouts by runs before results/ held each test's trace page and artifacts.
 **/.e2e/artifacts/
 **/.e2e/traces/
@@ -26,3 +27,7 @@ packages/e2e/docs/
 .env*
 # `pnpm run canary` writes this changeset and consumes it in the same run.
 .changeset/canary.md
+# docs/engineering 只跟踪部署示例；计划与规格只留本地
+docs/engineering/*
+!docs/engineering/deploy/
+!docs/engineering/deploy/**

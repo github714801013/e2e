@@ -28,7 +28,9 @@
     "packages/acp/tests/fixtures/scripted-agent.ts",
     "packages/acp/tests/live/*.ts",
     "packages/e2e/tests/live/*.ts",
-    "packages/e2e/src/config/register.ts"
+    "packages/e2e/src/config/register.ts",
+    "packages/e2e/src/run/dynamic-host.ts",
+    "packages/e2e/src/mcp/http/server.ts"
   ],
   "ignorePatterns": [
     "docs/**",

@@ -16,6 +16,8 @@ export interface ResolvedTestOptions {
   readonly platforms: readonly string[] | undefined;
   readonly requires: readonly Capability[];
   readonly session: string | undefined;
+  /** Whether the target's shared login is restored; false for a login-flow test. */
+  readonly sharedSession: boolean;
   readonly agentContext: string | undefined;
   /**
    * The configured agents the test runs as, one pair (and one result) each,
@@ -165,6 +167,7 @@ export function resolveOptions(test: CollectedTest, config: ResolvedConfig): Res
   let platforms: readonly string[] | undefined;
   let requires: readonly Capability[] = [];
   let session: string | undefined;
+  let sharedSession = true;
   let pin: readonly string[] | undefined;
   let skipReason: string | undefined;
   let trace: TestOptions['trace'];
@@ -179,6 +182,7 @@ export function resolveOptions(test: CollectedTest, config: ResolvedConfig): Res
     if (layer.platforms !== undefined) platforms = layer.platforms;
     if (layer.requires !== undefined) requires = layer.requires;
     if (layer.session !== undefined) session = layer.session;
+    if (layer.sharedSession !== undefined) sharedSession = layer.sharedSession;
     if (layer.agent !== undefined) pin = typeof layer.agent === 'string' ? [layer.agent] : layer.agent;
     if (layer.agentContext !== undefined) agentContextParts.push(layer.agentContext);
     if (layer.skip !== undefined && layer.skip !== false) {
@@ -219,6 +223,7 @@ export function resolveOptions(test: CollectedTest, config: ResolvedConfig): Res
     platforms,
     requires,
     session,
+    sharedSession,
     agents: effectiveAgents(test, pin, config.agentNames),
     agentContext: agentContextParts.length === 0 ? undefined : agentContextParts.join('\n'),
     skipReason,

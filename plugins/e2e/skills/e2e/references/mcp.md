@@ -11,6 +11,7 @@ screen where it failed.
 ## Contents
 
 - Setup
+- HTTP mode
 - Tools
 - Workflow
 - Fixing a failing test
@@ -55,7 +56,78 @@ Flags: `--config <path>` names the default config file, `--target <name>`
 fixes the target every session opens on, `--headed` shows the browser or
 simulator when the engine supports it in sessions that do not set `headed`
 (sessions are headless by default, as in `e2e run`), `--max-sessions <n>`
-sets how many sessions may be open at once (default 4, 1 through 16).
+sets how many native sessions may be open at once over stdio (default 4, 1
+through 16). With `--http` it is refused: use `--max-sessions-per-domain <n>`
+(default 20, 1 through 100), the sessions one principal may hold on one
+target domain.
+
+## HTTP mode
+
+For clients that connect over a socket instead of launching `e2e mcp`, serve
+Streamable HTTP with a Bearer token list:
+
+```bash
+E2E_HTTP_MCP_TOKENS='[{"token":"<at least 32 characters>","principal":"alice"}]' npx e2e mcp --http --port 3001
+```
+
+Clients connect to `http://127.0.0.1:3001/mcp/e2e` with
+`Authorization: Bearer <token>`. The four tools and the guide resources are
+the same as over stdio. Each MCP session gets its own browser and its own
+stdio child, so two clients of the same principal still see separate pages;
+a session id works only with the token that opened it. The child opens at
+most one native session. There is no global session cap: a session that opens
+a target counts against its principal's `--max-sessions-per-domain` quota for
+that target's app URL host (or the target name for a device), and opening
+past the limit closes the group's least recently active session.
+A token entry may limit `tools`; it also gains three script tools over HTTP:
+`list_test_scripts` (collect the project, grouped by file), `get_test_script`,
+and `save_test_script` (atomic, at most 256 KiB; creates missing parent
+directories; runs a collection on the candidate and refuses content that does
+not collect, keeping the old file).
+Paths stay under `--test-root` (default the working directory) and must name
+`.e2e.ts` files.
+`list_test_scripts` and `get_test_script` are in the default set;
+`save_test_script` must be named. A failed collection reports the exit status
+only: the child's stderr is project output and is never returned. Four job tools, also granted by name, run
+files asynchronously: `run_test` queues one to fifty project-relative test
+files on a target and returns a `jobId` at once, `get_test_status` reports
+its state and counts, `get_test_report` returns the per-test results and
+bounded failure evidence, and `list_test_artifacts` lists what a finished job
+kept, with an authenticated `downloadUrl` for each local file (poll it while
+`ready` is false, since the copy lands after the run ends). A job belongs to
+the submitting principal, so a token granted a job tool must name one, and
+outlives the connection that queued it. That check only gates reading: every job on one target shares the
+run, its authentication, and the capacity limits below. It is not a tenant
+boundary: project code runs as the gateway's user and can read its
+environment, so clients that do not trust each other need separate users,
+projects, and gateways. Submissions for one
+target join its current run, whose authentication setup runs once; a repeated
+file gets its own result. Workers grow only for queued work and never past
+`--max-workers` (default 4, 1 to 64), even when the project asks for more.
+`--max-runs` (default 2, 1 to 16) bounds concurrent runs, and one run holds at
+most 20 unfinished jobs; past either limit `run_test` returns
+`CAPACITY_EXCEEDED`. A run still busy after thirty minutes ends its remaining
+jobs `timed_out` with `RUN_TIMEOUT`; a job that times out while collecting
+stops the shared run, so its neighbours do not wait for it. A submission that
+arrives after a run sealed waits for its child to exit before starting the
+next run, so one target never runs two logins. A run-level hook failure such
+as a failing `afterAll` also fails jobs that already reported `passed`. A
+Runner that crashes or loses its IPC channel marks its unfinished jobs
+`infrastructure_error`; a gateway restart marks them `interrupted`. Neither
+replays a test. Finished job records stay readable for 14 days, and before a
+stopped run's output directory is removed its artifacts are copied to
+`.e2e/http-jobs/artifacts/<jobId>/` with an index beside them (at most 256 MiB
+per file and 1 GiB per job; a larger file is skipped and listed with its
+reason). `list_test_artifacts` returns at most 200 descriptors and sets
+`truncated` past that; a file past the first 200 has no listing entry. Once
+`ready` is true the listing is final, with `error` naming why nothing was kept.
+Each `downloadUrl` is a `GET` on the same gateway with
+the same Bearer token, which must carry `list_test_artifacts`; another
+principal's job and an unknown one both answer `404`. Run one gateway per
+project. Host and Origin are checked against
+loopback by default; `--allow-host`, `--allow-origin`, `--max-body`, and
+`--session-ttl` adjust that boundary. `GET /healthz` reports status and
+session count without a token, and `--path /healthz` is refused at startup.
 
 ## Tools
 
@@ -101,6 +173,10 @@ result's `isError: true`; treat them as failed calls.
 `writing-tests`). Before the session's first `screenshot`, a point tool
 (`tap_at`, `hover_at`, `drag_at`, `type_at`, `press_at`, `select_at`) only
 says to take one.
+
+A secret whose name starts with `<target>.` belongs to that target; the
+session's opening text names the target it is on, so use the prefix that
+matches it when several targets are configured.
 
 Resources: `e2e://guide` and `e2e://guide/<topic>` hold this skill.
 
@@ -291,8 +367,8 @@ session runs the test and stops where it failed:
   `UNKNOWN_TARGET`: no target of that name; the message lists the declared
   ones. `NO_SESSION`: call `open_session` first, or the session named has
   ended (the message says why). `SESSION_REQUIRED`: several sessions are open;
-  pass `session`. `SESSION_OPEN`: every session slot is taken (close one, or
-  raise `--max-sessions`). `CONFIG_IN_USE`: open sessions use another config;
+  pass `session`. `SESSION_OPEN`: every stdio session slot is taken (close
+  one, or raise `--max-sessions`). `CONFIG_IN_USE`: open sessions use another config;
   open on theirs, or close them first. `ENGINE_IN_USE`: the target's engine
   comes from a package every session shares; create it in the config or a
   file it imports by path. `UNKNOWN_TOOL`: the name is not in this session's

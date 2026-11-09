@@ -76,6 +76,16 @@ export interface OpenSessionOptions {
   readonly test?: string | undefined;
 }
 
+/** What an open returns: the text a client reads and the target the HTTP gateway counts. */
+interface OpenedSession {
+  /** The opening text: the summary, the catalog, and the first screen. */
+  readonly text: string;
+  readonly target: string;
+  readonly platform: string;
+  /** The target's app URL; a device target has none, and the gateway keys on the target name. */
+  readonly appUrl?: string | undefined;
+}
+
 export interface SessionHostOptions {
   /** The absolute path of the config a session loads, without evaluating it; `configPath` overrides the server's default. */
   readonly locateConfig: (configPath: string | undefined) => string;
@@ -133,10 +143,11 @@ export class SessionHost {
 
   /**
    * Opens a session and returns its opening text: the summary, the catalog,
-   * and the first screen. `signal` is the request's: a client that cancels
-   * it, or disconnects, aborts the open and what it started.
+   * and the first screen, plus the target it landed on, which `open_session`
+   * reports. `signal` is the request's: a client that cancels it, or
+   * disconnects, aborts the open and what it started.
    */
-  open(options: OpenSessionOptions, signal?: AbortSignal): Promise<string> {
+  open(options: OpenSessionOptions, signal?: AbortSignal): Promise<OpenedSession> {
     const headed = options.headed ?? this.options.headed;
     const usage = new SessionUsage(this.sessions.liveCount, headed);
     return this.sessions.admit((id) => this.openSession(id, options, headed, usage, signal)).catch((cause: unknown) => {
@@ -242,7 +253,7 @@ export class SessionHost {
     headed: boolean,
     usage: SessionUsage,
     request: AbortSignal | undefined,
-  ): Promise<string> {
+  ): Promise<OpenedSession> {
     // The catalog renders synchronously, so the optional SDK is loaded once
     // here when installed. Without it the catalog reads the tools' Standard
     // Schemas, and only a model-backed call needs the package.
@@ -365,7 +376,13 @@ export class SessionHost {
       // A step that ends on its own (the TTL, a hard stop) ends the session.
       void step.done.then((ended) => this.endOnItsOwn(live, ended.error === undefined ? 'the session step concluded' : errorMessage(ended.error), 'step'));
       this.touch(live);
-      return text;
+      const base = live.target.app.base?.href;
+      return {
+        text,
+        target: live.target.name,
+        platform: live.target.platform,
+        ...(base === undefined ? {} : { appUrl: base }),
+      };
     } catch (cause) {
       opening.removeEventListener('abort', cancel);
       await this.closeAttempt(attempt, abort, async () => {
@@ -468,6 +485,9 @@ export class SessionHost {
     if (config.secrets.size > 0) {
       lines.push(`Secrets: ${[...config.secrets.keys()].map((name) => `"${name}"`).join(', ')}. Fill one into any input with type_secret and its name; you never see the value.`);
     }
+    if ([...config.secrets.keys()].some((name) => name.startsWith(`${live.target.name}.`))) {
+      lines.push(`Secrets whose names start with "${live.target.name}." belong to this target.`);
+    }
     lines.push(
       `Pass session "${live.id}" to every tools, call, and close_session; with several sessions open, a call without it fails.`,
     );
@@ -532,8 +552,23 @@ export class SessionHost {
           .optional()
           .describe('One test to run in the session first, named the way npx e2e run takes it: tests/checkout.e2e.ts:12, where 12 is the line its test( call is on (not a failing line inside it), or a file or name that selects one test. The session then stays on the screen where the test stopped; afterEach hooks and fixture teardown run at close_session. To rerun after editing the test, close_session and open_session with test again'),
       }).strict(),
+      outputSchema: z.object({
+        target: z.string().describe('The target the session opened'),
+        platform: z.string().describe('The target platform, such as web, ios, or android'),
+        appUrl: z.string().optional().describe("The target's app URL; absent for a device target"),
+      }).strict(),
       readOnly: false,
-      call: async (args, extra) => textResult(await this.open(args, extra.signal)),
+      call: async (args, extra) => {
+        const opened = await this.open(args, extra.signal);
+        return {
+          content: [{ type: 'text', text: opened.text }],
+          structuredContent: {
+            target: opened.target,
+            platform: opened.platform,
+            ...(opened.appUrl === undefined ? {} : { appUrl: opened.appUrl }),
+          },
+        };
+      },
     });
   }
 
