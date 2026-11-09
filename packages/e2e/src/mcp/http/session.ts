@@ -63,9 +63,13 @@ export function withRequestBaseUrl<T>(baseUrl: string, run: () => T): T {
  */
 const PROXY_TIMEOUT_MS = 2_147_483_647;
 
-/** One authenticated MCP session, bound to the principal that opened it. */
+/**
+ * One authenticated MCP session, bound to the principal that opened it. A
+ * client re-initializing with an id the gateway no longer knows gets a
+ * session under that same id, so the handle it holds keeps working.
+ */
 export class HttpSession {
-  readonly id = randomUUID();
+  readonly id: string;
   readonly allowedTools: ReadonlySet<HttpMcpTool>;
   readonly transport: WebStandardStreamableHTTPServerTransport;
   readonly server: Server;
@@ -85,7 +89,9 @@ export class HttpSession {
     private readonly scripts: ScriptService,
     private readonly jobs: JobService | undefined,
     private readonly hooks: SessionHooks,
+    id: string = randomUUID(),
   ) {
+    this.id = id;
     this.allowedTools = new Set(this.token.tools);
     this.usesChild = this.token.tools.some(isNativeMcpTool);
     this.transport = new WebStandardStreamableHTTPServerTransport({

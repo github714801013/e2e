@@ -74,7 +74,9 @@ Clients connect to `http://127.0.0.1:3001/mcp/e2e` with
 `Authorization: Bearer <token>`. The four tools and the guide resources are
 the same as over stdio. Each MCP session gets its own browser and its own
 stdio child, so two clients of the same principal still see separate pages;
-a session id works only with the token that opened it. The child opens at
+a session id works only with the token that opened it; an `initialize` that
+carries an id the gateway no longer knows reopens the session under that id,
+while any other request with an unknown id is `404`. The child opens at
 most one native session. There is no global session cap: a session that opens
 a target counts against its principal's `--max-sessions-per-domain` quota for
 that target's app URL host (or the target name for a device), and opening

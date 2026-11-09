@@ -9,6 +9,7 @@ import { createReadStream } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { isInitializeRequest } from '@modelcontextprotocol/server';
 import { ConfigurationError, errorMessage } from '../../internal/errors.ts';
 import { processSecrets } from '../../run/secrecy.ts';
 import {
@@ -24,6 +25,7 @@ import {
   originAllowed,
   RUN_TIMEOUT_MS,
   type HttpMcpOptions,
+  type HttpMcpToken,
 } from './config.ts';
 import { headerFileName } from './job-artifacts.ts';
 import { JobService } from './jobs.ts';
@@ -44,6 +46,8 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
   const sessions = new Map<string, HttpSession>();
   /** Sessions being closed whose child is still stopping. */
   const closingSessions = new Set<Promise<void>>();
+  /** Ids of those sessions: not reusable until their quota slot is released. */
+  const closingIds = new Set<string>();
   const quota = new SessionQuota(options.maxSessionsPerDomain);
   const startedAt = Date.now();
   let closing = false;
@@ -160,6 +164,7 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
     // answers 404), while the domain quota keeps counting the session until
     // its child stops.
     sessions.delete(id);
+    closingIds.add(id);
     const done = session.close();
     closingSessions.add(done);
     try {
@@ -168,6 +173,7 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
       closingSessions.delete(done);
       // A closing session still owns its browser until the child exits.
       quota.release(id);
+      closingIds.delete(id);
     }
     options.log(`session ${id} closed (${reason})`);
   }
@@ -219,6 +225,13 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
     if (sessionId !== undefined) {
       const session = sessions.get(sessionId);
       if (session === undefined) {
+        // A client whose session is gone can re-initialize under the id it
+        // still holds; the fresh transport answers with that same id.
+        const body = request.method === 'POST' && UUID_PATTERN.test(sessionId) ? await readBody(request, options.maxBodyBytes) : undefined;
+        if (body !== undefined && isInitializeBody(body)) {
+          await openAndForward(request, response, token, remote, body, sessionId);
+          return;
+        }
         sendJson(response, 404, { error: 'session_not_found' });
         return;
       }
@@ -246,9 +259,30 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
       sendJson(response, 400, { error: 'session_required' });
       return;
     }
-    const session = new HttpSession(options, token, scripts, jobs, hooks);
+    await openAndForward(request, response, token, remote, undefined);
+  }
+
+  /**
+   * Opens a session and forwards its initialize. `reusedId` is the id a
+   * client asked for after losing its session; any other id is generated.
+   */
+  async function openAndForward(
+    request: IncomingMessage,
+    response: ServerResponse,
+    token: HttpMcpToken,
+    remote: string,
+    body: Buffer | undefined,
+    reusedId?: string,
+  ): Promise<void> {
+    const session = new HttpSession(options, token, scripts, jobs, hooks, reusedId);
     // Hold the slot before the first await, so two concurrent initializes
-    // cannot both pass the limit check.
+    // cannot both pass the limit check. A duplicate re-initialize cannot
+    // replace a live session, and one still closing owns its id until its
+    // quota slot is released.
+    if (sessions.has(session.id) || closingIds.has(session.id)) {
+      sendJson(response, 404, { error: 'session_not_found' });
+      return;
+    }
     sessions.set(session.id, session);
     try {
       await session.connect();
@@ -257,10 +291,14 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
       sessions.delete(session.id);
       throw cause;
     }
-    options.log(`session ${session.id} opened for principal "${token.principal}" from ${remote}`);
+    options.log(
+      reusedId === undefined
+        ? `session ${session.id} opened for principal "${token.principal}" from ${remote}`
+        : `session ${session.id} regenerated for a reused session id for principal "${token.principal}" from ${remote}`,
+    );
     begin(session);
     try {
-      await forward(request, response, session);
+      await forward(request, response, session, body);
     } catch (cause) {
       end(session);
       await closeById(session.id, 'failed initialize');
@@ -270,12 +308,12 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
     if (!session.initialized) await closeById(session.id, 'initialize failed');
   }
 
-  async function forward(request: IncomingMessage, response: ServerResponse, session: HttpSession): Promise<void> {
+  async function forward(request: IncomingMessage, response: ServerResponse, session: HttpSession, body?: Buffer): Promise<void> {
     const controller = new AbortController();
     const abort = (): void => controller.abort();
     response.once('close', abort);
     try {
-      const web = toWebRequest(request, controller.signal);
+      const web = toWebRequest(request, controller.signal, body);
       // A tool that returns a link names the URL the client reached this
       // gateway through, not the address the socket happens to bind.
       const baseUrl = `${requestScheme(request, options.trustedProxies)}://${request.headers.host ?? 'localhost'}${options.path}`;
@@ -326,16 +364,57 @@ function listen(server: Server, host: string, port: number): Promise<void> {
   });
 }
 
-function toWebRequest(request: IncomingMessage, signal: AbortSignal): Request {
+function toWebRequest(request: IncomingMessage, signal: AbortSignal, buffered?: Buffer): Request {
   const headers = new Headers();
   for (const [name, value] of Object.entries(request.headers)) {
     if (Array.isArray(value)) for (const item of value) headers.append(name, item);
     else if (value !== undefined) headers.set(name, value);
   }
+  const url = `http://${request.headers.host ?? 'localhost'}${request.url ?? '/'}`;
+  // A body already read to decide whether it is an initialize goes in as is;
+  // the stream is spent.
+  if (buffered !== undefined) {
+    return new Request(url, {
+      ...(request.method === undefined ? {} : { method: request.method }),
+      headers,
+      body: new Uint8Array(buffered),
+      signal,
+    });
+  }
   const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
   const body = hasBody ? (Readable.toWeb(request) as ReadableStream<Uint8Array>) : undefined;
   const init = { method: request.method, headers, body, signal, duplex: 'half' } as RequestInit & { duplex: 'half' };
-  return new Request(`http://${request.headers.host ?? 'localhost'}${request.url ?? '/'}`, init);
+  return new Request(url, init);
+}
+
+/** The shape of every id this gateway hands out: a fresh UUID. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Reads a request body up to the transport's limit. A larger body is not
+ * inspected: its call answers 404 as it did before regeneration existed.
+ */
+async function readBody(request: IncomingMessage, limit: number): Promise<Buffer | undefined> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > limit) return undefined;
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
+}
+
+/** True when the body is the one initialize request a transport would accept. */
+function isInitializeBody(body: Buffer): boolean {
+  try {
+    const message: unknown = JSON.parse(body.toString('utf8'));
+    if (Array.isArray(message)) return message.length === 1 && isInitializeRequest(message[0]);
+    return isInitializeRequest(message);
+  } catch {
+    return false;
+  }
 }
 
 async function writeResponse(response: ServerResponse, answer: Response): Promise<void> {

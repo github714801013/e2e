@@ -919,7 +919,10 @@ has no guide resources.
 - `--trusted-proxy` names a proxy address whose `X-Forwarded-For` is believed
   for the log line. It changes nothing about authentication: the Bearer token
   is always the identity.
-- A session id bound to another token is `403` and an unknown id is `404`.
+- A session id bound to another token is `403` and an unknown id is `404`,
+  except that an `initialize` carrying an id the gateway no longer knows
+  reopens a session under that same id, so a client that lost its session to
+  a restart can reconnect without changing the handle it holds.
   There is no global session cap: each target a session opens joins its
   principal's quota for that target domain
   ([`--max-sessions-per-domain`](#max-sessions-per-domain)). A session that
@@ -964,7 +967,7 @@ checks.
 | --- | --- |
 | `401` | Missing or unknown Bearer token. |
 | `403` | Refused Host or Origin, or a session id owned by another token (or another principal). |
-| `404` | Unknown path or session id. |
+| `404` | Unknown path, or an unknown session id on any request but `initialize`. |
 | `413` | Request body over `--max-body`. |
 
 ## Resources

@@ -5,6 +5,7 @@
  * binds each session to the principal that opened it.
  */
 
+import { randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { request, type IncomingHttpHeaders } from 'node:http';
@@ -66,7 +67,7 @@ const INITIALIZE = JSON.stringify({
 });
 
 /** A successful initialize over fetch, leaving the response stream cancelled. */
-async function initializeRaw(url: string, token: string): Promise<{ status: number; sessionId: string | undefined }> {
+async function initializeRaw(url: string, token: string, reuseId?: string): Promise<{ status: number; sessionId: string | undefined }> {
   const controller = new AbortController();
   const response = await fetch(url, {
     method: 'POST',
@@ -74,6 +75,7 @@ async function initializeRaw(url: string, token: string): Promise<{ status: numb
       authorization: `Bearer ${token}`,
       'content-type': 'application/json',
       accept: 'application/json, text/event-stream',
+      ...(reuseId === undefined ? {} : { 'mcp-session-id': reuseId }),
     },
     body: INITIALIZE,
     signal: controller.signal,
@@ -167,6 +169,35 @@ test('sample passes', async () => {
     } finally {
       await transport.terminateSession().catch(() => undefined);
       await client.close().catch(() => undefined);
+      await gateway.close();
+    }
+  });
+
+  it('reopens a session under the id a client re-initializes with', async () => {
+    const gateway = await startGateway(project, app, [{ token: TOKEN_A, principal: 'alpha' }]);
+    const reused = randomUUID();
+    try {
+      // The gateway never issued this id: the handshake answers with it anyway.
+      const reinit = await initializeRaw(gateway.url, TOKEN_A, reused);
+      expect(reinit.status).toBe(200);
+      expect(reinit.sessionId).toBe(reused);
+      expect((await health(gateway.url)).sessions, gateway.stderr()).toBe(1);
+      await expect
+        .poll(() => gateway.stderr().includes(`session ${reused} regenerated for a reused session id`), { timeout: 10_000, interval: 200 })
+        .toBe(true);
+      const followUp = await raw(gateway.url, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${TOKEN_A}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          'mcp-session-id': reused,
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+      });
+      expect(followUp.status).toBe(200);
+      expect(followUp.text).toContain('list_test_scripts');
+    } finally {
       await gateway.close();
     }
   });
