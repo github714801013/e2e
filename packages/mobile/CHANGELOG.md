@@ -1,5 +1,29 @@
 # @e2e-dev/mobile
 
+## 0.12.7
+
+### Patch Changes
+
+- [#1674](https://github.com/e2e-inc/e2e/pull/1674) [`e534014`](https://github.com/e2e-inc/e2e/commit/e53401488a57c901dff72a8bd2a322990f157328) Thanks [@KrzysztofMoch](https://github.com/KrzysztofMoch)! - Fix `ENGINE_FAILURE (launch) boot failed: N devices match this request equally` when a target names no `device` and no simulator or emulator is booted. The engine now asks agent-device to boot a shut-down one: newest OS first, then name order.
+
+- [#1624](https://github.com/e2e-inc/e2e/pull/1624) [`1abd372`](https://github.com/e2e-inc/e2e/commit/1abd3729ebb76eac9884cec2894c7b46535d64c7) Thanks [@karolkulesza](https://github.com/karolkulesza)! - `device.dismissKeyboard()` now documents in its type how it dismisses the keyboard and when it fails, and the `videoTouches` description names Expo Simulators as a slow hosted daemon.
+
+- [#1672](https://github.com/e2e-inc/e2e/pull/1672) [`3735887`](https://github.com/e2e-inc/e2e/commit/373588756937562aa89c7dd7f7995ac6b16db972) Thanks [@okwasniewski](https://github.com/okwasniewski)! - Move GitHub repository metadata and CLI links to e2e-inc/e2e after the organization rename. Register the MCP server as io.github.e2e-inc/e2e.
+
+- [#1665](https://github.com/e2e-inc/e2e/pull/1665) [`3c9de80`](https://github.com/e2e-inc/e2e/commit/3c9de80d9e6017c8ce66e310742b92580a029cba) Thanks [@KrzysztofMoch](https://github.com/KrzysztofMoch)! - Open an MCP session in a directory with no config: `open_session {engine: "@e2e-dev/web", app: {url}}` names the engine to drive and `app` the app under test. `engine` is a package name, or the factory call a config would write as `{package, export, options}`, where an option can be another such call: `{package: "@e2e-dev/mobile", options: {platform: "ios", device: {package: "@e2e-dev/limrun", export: "limrun"}}}`. Each package is found in the project, beside e2e, or in `~/.e2e/engines`; when it is in none, `ENGINE_NOT_INSTALLED` names the install command. `@e2e-dev/web` and `@e2e-dev/mobile` export their factory as the default export for this, and `mobile()` called without a platform now says which platforms it takes.
+
+- [#1619](https://github.com/e2e-inc/e2e/pull/1619) [`a016b3e`](https://github.com/e2e-inc/e2e/commit/a016b3e4e99f0ad09a2466221740d244241f602f) Thanks [@karolkulesza](https://github.com/karolkulesza)! - `mobile({ device: null })` now fails with `INVALID_CONFIG` instead of a raw `TypeError`.
+
+- [#1640](https://github.com/e2e-inc/e2e/pull/1640) [`6dbb8f9`](https://github.com/e2e-inc/e2e/commit/6dbb8f99668c621750424b86155a9310b7554006) Thanks [@kdy1](https://github.com/kdy1)! - Log how long each device's prepare steps took: a line such as `iPhone 17 Pro: boot 8.1s, iOS runner 120.3s, open Settings 3.2s` follows each `booting` line, also when a step fails or times out, so a slow engine prepare in the run output shows where the time went.
+
+- [#1564](https://github.com/e2e-inc/e2e/pull/1564) [`f45d9f8`](https://github.com/e2e-inc/e2e/commit/f45d9f869e97c7020f96ec9ea1f6e335d95b32c4) Thanks [@shamilovtim](https://github.com/shamilovtim)! - Wait out the remaining transition budget before a test scrolls the screen, including after dismissing a native alert.
+
+- [#1668](https://github.com/e2e-inc/e2e/pull/1668) [`2b727fe`](https://github.com/e2e-inc/e2e/commit/2b727fe48a7115549b00f81994320f143cdb55a3) Thanks [@kdy1](https://github.com/kdy1)! - Send `postGestureStabilization: false` with a test's own swipe and scroll, so an agent-device release that accepts the option stops holding the next read for up to 3.5 s after a gesture the test then checks with `expect`. The first action on a control within 2 s of such a gesture re-reads the control until two reads agree on where it is, so a tap does not land on a list still coasting and get swallowed. The agent's gestures keep the wait. agent-device 0.21.36 ignores the option, so the speedup waits for a release that has it; until then the re-read adds one snapshot to the first action after a test's swipe or scroll.
+
+- [#1587](https://github.com/e2e-inc/e2e/pull/1587) [`34ccc5f`](https://github.com/e2e-inc/e2e/commit/34ccc5f38820befd2cc77795dd463507aaccd8ea) Thanks [@kdy1](https://github.com/kdy1)! - PNG decoding and encoding now run on `@napi-rs/image`, a native addon with a prebuilt binary per platform, in place of `fast-png` and `pngjs`: decoding is 8 to 15 times faster, encoding 5 to 8 times, and a `toHaveScreenshot` capture 4 to 12 times. Stored screenshots decode to the same pixels as before. A screenshot the runner writes (a new baseline, or one rewritten because the screen changed) has the same pixels in different bytes: a Chromium capture comes out about 15% larger and a device screenshot about 20% smaller. The binary adds about 15 to 21 MB to an install, depending on the platform, and the package publishes none for Linux on ppc64, s390x, or riscv64. `e2e` loads it when the first screenshot is read or written, so `--version` and a run that takes none never need it, and a missing binding fails that call with `IMAGE_CODEC_UNAVAILABLE`; `@e2e-dev/mobile` and `@e2e-dev/decision` load it when they are imported. Gray PNGs with 1, 2, or 4 bits per sample now decode, and a 16-bit gray or RGB PNG with a transparent color now compares pixels to it at 16 bits, so a pixel that only rounds to it at 8 bits stays opaque.
+
+- [#1605](https://github.com/e2e-inc/e2e/pull/1605) [`62d3c66`](https://github.com/e2e-inc/e2e/commit/62d3c668a935a8c26227750067bb1127e5d036e4) Thanks [@karolkulesza](https://github.com/karolkulesza)! - `device.setPermission` rejects an unknown permission name or state with `INVALID_ARGUMENT`, naming the nearest permission for a typo.
+
 ## 0.12.6
 
 ### Patch Changes
