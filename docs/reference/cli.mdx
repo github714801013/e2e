@@ -975,6 +975,7 @@ bunx e2e list --changed-since origin/main
 | Option | Description |
 | --- | --- |
 | `[files...]` | As for [`run`](#positional-arguments). |
+| `--prefix <prefix>` | Only files under this literal path prefix, relative to the project root or absolute inside it. A test file outside the prefix that fails to collect no longer fails the list; one under it still does. |
 | `--config`, `--target`, `--tag`, `--tag-mode`, `--exclude-tag`, `--grep`, `--grep-invert`, `--changed-since`, `--last-failed`, `--shard`, `--pass-with-no-tests` | As for [`run`](#flags). `--last-failed` reads `report.json` under the config's [`output`](/reference/config#output). The configured [test filters](/filters) run as for `run`, and their lines go to stderr. |
 | `--reporter <id>` | `list` or `json`. Default: `list`. |
 

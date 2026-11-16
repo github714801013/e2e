@@ -330,6 +330,12 @@ export interface ListOptions
   config?: string | E2EConfig | undefined;
   /** Target names (`--target`). An unknown name is `UNKNOWN_TARGET`. */
   targets?: readonly string[] | undefined;
+  /**
+   * A literal path prefix (`--prefix`): only discovered files it starts with
+   * are selected, so an unrelated file that fails to collect does not fail
+   * the call.
+   */
+  prefix?: string | undefined;
 }
 
 /**
@@ -416,7 +422,7 @@ export async function listSelection(options: ListOptions, notice: (message: stri
   };
   const config = await (processOutput === undefined ? loadConfig() : processOutput.withholdDuring(loadConfig));
   const { changedSince } = runOptions;
-  const collection = await collect(config, runOptions.files);
+  const collection = await collect(config, runOptions.files, undefined, runOptions.prefix);
   const inputs = await selectionInputs(runOptions, config);
   const first = select(collection, config, inputs.filters, runOptions.passWithNoTests !== undefined ? { passWithNoTests: runOptions.passWithNoTests } : {});
   const selection =
@@ -1391,9 +1397,10 @@ interface SelectionInputs {
 }
 
 /**
- * What `loadRunConfig`, `selectionInputs`, and `validateRunOptions` read.
- * `run` passes `RunOptions`; `list` translates the public bag into these
- * (`config` string to `configPath`, object to `rawConfig`, `targets` to `targetIds`).
+ * What `loadRunConfig`, `selectionInputs`, and `validateRunOptions` read, plus
+ * the `prefix` `listSelection` passes to collection. `run` passes `RunOptions`;
+ * `list` translates the public bag into these (`config` string to `configPath`,
+ * object to `rawConfig`, `targets` to `targetIds`).
  */
 type SelectionRunOptions = Pick<
   RunOptions,
@@ -1415,7 +1422,10 @@ type SelectionRunOptions = Pick<
   | 'maxFailures'
   | 'maxDuration'
   | 'repeatEach'
->;
+> & {
+  /** A literal path prefix, from `list`'s `--prefix`, that narrows collection. */
+  prefix?: string | undefined;
+};
 
 /** The public `list` bag as the options config loading and selection already take. */
 export function toSelectionRunOptions(options: ListOptions): SelectionRunOptions {

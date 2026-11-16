@@ -265,6 +265,22 @@ describe('ScriptService list', () => {
     expect(limited.truncated).toBe(true);
   });
 
+  it('passes the prefix to the collection child', async () => {
+    const dir = root();
+    writeFiles(dir, 'tests/healthy/a.e2e.ts');
+    const result = {
+      projectRoot: dir,
+      pairs: [{ file: 'tests/healthy/a.e2e.ts', title: 'healthy', target: 'web', agent: 'default', tags: [] }],
+    };
+    const cli = fakeCli(
+      dir,
+      `if (!process.argv.includes('--prefix')) process.exitCode = 2;\nelse console.log(${JSON.stringify(JSON.stringify(result))});`,
+    );
+    const scripts = await service(dir, cli);
+    const listed = await scripts.listScripts({ prefix: 'tests/healthy' }, new AbortController().signal);
+    expect(listed.scripts.map((script) => script.path)).toEqual(['tests/healthy/a.e2e.ts']);
+  });
+
   it('turns a failed, silent, or malformed collection into COLLECTION_ERROR', async () => {
     const dir = root();
     const signal = new AbortController().signal;

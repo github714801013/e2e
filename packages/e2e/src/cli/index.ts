@@ -969,7 +969,11 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
     .argument('[files...]', FILES_DESCRIPTION)
     .optionsGroup('Selection:')
     .option('--config <path>', 'config file (default: the nearest e2e.config.ts, .mts, .js, or .mjs)')
-    .option('--target <ids>', 'target names, comma-separated or repeated (default: all targets)', parseNames('target'));
+    .option('--target <ids>', 'target names, comma-separated or repeated (default: all targets)', parseNames('target'))
+    .option(
+      '--prefix <prefix>',
+      'only discovered files under this literal path prefix, relative to the project root or absolute inside it; an unrelated file that fails to collect no longer fails the list',
+    );
   selectionOptions(listCommand)
     .optionsGroup('Output:')
     .addOption(
@@ -1000,6 +1004,7 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
         options: SelectionFlagValues & {
           config?: string;
           target?: string[];
+          prefix?: string;
           reporter: ListReporter;
         },
         command: Command,
@@ -1016,6 +1021,7 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
               files,
               config: options.config,
               targets: options.target,
+              prefix: options.prefix,
               ...selectionRunOptions(options),
             },
             (message) => process.stderr.write(`${bounded(message)}\n`),

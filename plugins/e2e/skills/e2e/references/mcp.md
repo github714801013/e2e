@@ -101,15 +101,18 @@ a target counts against its principal's `--max-sessions-per-domain` quota for
 that target's app URL host (or the target name for a device), and opening
 past the limit closes the group's least recently active session.
 A token entry may limit `tools`; it also gains three script tools over HTTP:
-`list_test_scripts` (collect the project, grouped by file), `get_test_script`,
+`list_test_scripts` (collect the project's tests, grouped by file; `prefix`
+narrows collection, so an unrelated file that fails to import does not fail
+the call), `get_test_script`,
 and `save_test_script` (atomic, at most 256 KiB; creates missing parent
 directories; runs a collection on the candidate and refuses content that does
 not collect, keeping the old file).
 Paths stay under `--test-root` (default the working directory) and must name
 `.e2e.ts` files.
 `list_test_scripts` and `get_test_script` are in the default set;
-`save_test_script` must be named. A failed collection reports the exit status
-only: the child's stderr is project output and is never returned. Four job tools, also granted by name, run
+`save_test_script` must be named. A failed collection in a selected file
+reports the exit status only: the child's stderr is project output and is
+never returned. Four job tools, also granted by name, run
 files asynchronously: `run_test` queues one to fifty project-relative test
 files on a target and returns a `jobId` at once, `get_test_status` reports
 its state and counts, `get_test_report` returns the per-test results and

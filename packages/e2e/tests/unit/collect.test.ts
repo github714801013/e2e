@@ -213,6 +213,34 @@ describe('collect', () => {
       rmSync(projectRoot, { recursive: true, force: true });
     }
   });
+
+  it('narrows collection to a literal prefix, tolerating a failing file outside it', async () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), 'e2e-prefix-'));
+    try {
+      for (const [file, source] of Object.entries({
+        'tests/healthy/a.e2e.ts': 'export {};\n',
+        'tests/broken/b.e2e.ts': 'const broken = ;\n',
+      })) {
+        mkdirSync(path.dirname(path.join(projectRoot, file)), { recursive: true });
+        writeFileSync(path.join(projectRoot, file), source);
+      }
+      const config = resolveConfig(
+        { targets: [{ name: 'web', platform: 'web' }], tests: 'tests/**/*.e2e.ts' },
+        { projectRoot, env: {} as NodeJS.ProcessEnv },
+      );
+      await expect(collect(config)).rejects.toThrow(/failed to collect tests\/broken\/b\.e2e\.ts/);
+      const narrowed = await collect(config, [], undefined, 'tests/healthy');
+      expect(narrowed.files.map((file) => file.file)).toEqual(['tests/healthy/a.e2e.ts']);
+      expect(narrowed.uncollected.map((file) => file.file)).toEqual(['tests/broken/b.e2e.ts']);
+      const absolute = await collect(config, [], undefined, path.join(projectRoot, 'tests', 'healthy'));
+      expect(absolute.files.map((file) => file.file)).toEqual(['tests/healthy/a.e2e.ts']);
+      expect(absolute.uncollected.map((file) => file.file)).toEqual(['tests/broken/b.e2e.ts']);
+      await expect(collect(config, [], undefined, 'tests/broken')).rejects.toThrow(/failed to collect tests\/broken\/b\.e2e\.ts/);
+      await expect(collect(config, [], undefined, '')).rejects.toThrow(/failed to collect tests\/broken\/b\.e2e\.ts/);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('relativeToRoot', () => {

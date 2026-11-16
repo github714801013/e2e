@@ -465,6 +465,28 @@ export async function collectSetups(config: ResolvedConfig): Promise<Collection>
 }
 
 /**
+ * A literal prefix as a project-root-relative path discovered files can be
+ * compared against. A prefix that is absolute or needs path normalization is
+ * resolved only when it stays inside the root, so the narrowed collection
+ * selects exactly the files a `startsWith` over discovered paths would.
+ */
+function collectionPrefix(projectRoot: string, prefix: string): string {
+  const normalized = prefix.replaceAll('\\', '/').replace(/^\.\//, '');
+  if (normalized === '') return '';
+  const trailingSlash = normalized.endsWith('/');
+  const body = trailingSlash ? normalized.slice(0, -1) : normalized;
+  const segments = body.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return normalized;
+  let relative: string;
+  try {
+    relative = relativeToRoot(projectRoot, path.isAbsolute(body) ? path.normalize(body) : path.resolve(projectRoot, body));
+  } catch {
+    return normalized;
+  }
+  return trailingSlash ? `${relative}/` : relative;
+}
+
+/**
  * Runs collection: resolves globs, sorts matched files by code point, imports
  * each module once in the collection realm, and records which files any
  * positional arguments selected. Every discovered file is imported even when
@@ -473,17 +495,30 @@ export async function collectSetups(config: ResolvedConfig): Promise<Collection>
  * positional named. A collection error in a selected file, or anywhere in an
  * unnarrowed run, fails the run; one in a file positionals left out is kept
  * in `uncollected`, so a half-written file elsewhere in the suite does not
- * stop `e2e run tests/one.e2e.ts`.
+ * stop `e2e run tests/one.e2e.ts`. `prefix` narrows the same way for a caller
+ * naming a literal path prefix, such as `e2e list --prefix`.
  */
 export async function collect(
   config: ResolvedConfig,
   positionals: readonly string[] = [],
   graph?: string,
+  prefix?: string,
 ): Promise<Collection> {
   const discovered = discoverFiles(config.projectRoot, config.tests);
-  const { files: selectedFiles, unmatched, lines } = selectPositionals(config.projectRoot, discovered, positionals);
+  const { files: positionalFiles, unmatched, lines } = selectPositionals(config.projectRoot, discovered, positionals);
+  const narrowedTo = prefix === undefined ? undefined : collectionPrefix(config.projectRoot, prefix);
+  const selectedFiles = narrowedTo === undefined ? positionalFiles : positionalFiles.filter((file) => file.startsWith(narrowedTo));
   const selected = new Set(selectedFiles);
-  const { files, uncollected } = await collectFiles(config, discovered, (file) => selected.has(file), positionals.length > 0, lines, graph);
+  const { files, uncollected } = await collectFiles(
+    config,
+    discovered,
+    (file) => selected.has(file),
+    // An empty prefix selects every discovered file, so a failure in any of
+    // them still fails the list.
+    positionals.length > 0 || (narrowedTo !== undefined && narrowedTo !== ''),
+    lines,
+    graph,
+  );
   return {
     files,
     tests: files.flatMap((file) => file.tests),

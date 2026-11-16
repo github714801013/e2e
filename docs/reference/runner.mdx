@@ -253,6 +253,7 @@ process sees an edit.
 | `targets` | `['web']` | `readonly string[]` | - |
 | `cwd` | `'apps/web'` | `string` | the current working directory |
 | `files` | `['tests/', 'signup.e2e.ts:12']` | `readonly string[]` | the configured suite |
+| `prefix` | `'tests/oa-m'` | `string` | - |
 | `tags`, `tagMode`, `excludeTags` | `{ tags: ['smoke'], tagMode: 'all' }` | `readonly string[]`, `'any' \| 'all'` | - |
 | `grep`, `grepInvert` | `[/checkout/]` | `readonly RegExp[]` | - |
 | `lastFailed` | `true` | `boolean` | - |
@@ -265,6 +266,8 @@ process sees an edit.
 - `targets` names targets, as `--target` does.
 - `files` is the positional file selection: paths, globs, bare names, and
   `file:line`.
+- `prefix` narrows collection to the literal path prefix, as the `--prefix`
+  flag of `e2e list` does: files outside it that fail to collect are tolerated.
 - `tags`, `tagMode`, and `excludeTags` are the `--tag`, `--tag-mode`, and
   `--exclude-tag` filters.
 - `grep` and `grepInvert`: a test's describe titles and title, joined by

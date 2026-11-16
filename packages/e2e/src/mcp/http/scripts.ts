@@ -75,11 +75,15 @@ interface ScriptServiceOptions {
 const LIST_SCHEMA: Tool = {
   name: 'list_test_scripts',
   description:
-    'List the test files in the configured test root that a run would collect, with the tests each declares. Runs collection in a child process; a test file that fails at import fails the call.',
+    'List the test files in the configured test root that a run would collect, with the tests each declares. Runs collection in a child process; with prefix, only a test file under it that fails at import fails the call, while an unrelated file that fails is left out.',
   inputSchema: {
     type: 'object',
     properties: {
-      prefix: { type: 'string', maxLength: MAX_TEXT_ARG_CHARS, description: 'Only files whose path under the test root starts with this.' },
+      prefix: {
+        type: 'string',
+        maxLength: MAX_TEXT_ARG_CHARS,
+        description: 'Only files whose path under the test root starts with this literal prefix; collection narrows to them, so an unrelated file that fails to import does not fail the call.',
+      },
       keyword: { type: 'string', maxLength: MAX_TEXT_ARG_CHARS, description: 'Only files whose path or a test title contains this, case-insensitive.' },
       limit: {
         type: 'integer',
@@ -199,9 +203,15 @@ export class ScriptService {
 
   /** Collects the project in a child and groups the pairs by file. */
   async listScripts(input: { prefix?: string | undefined; keyword?: string | undefined; limit?: number | undefined }, signal: AbortSignal): Promise<ListScriptsResult> {
-    // The lock keeps a save's candidate out of the collected tree.
-    const { projectRoot, pairs } = await this.withCollectionLock(() => this.collect(signal));
     const prefix = input.prefix === undefined ? undefined : normalizePrefix(input.prefix);
+    // The child runs in the test root, while `--prefix` narrows on the
+    // project-root-relative path the collection reports.
+    const collectionPrefix =
+      prefix === undefined || prefix === ''
+        ? prefix
+        : path.resolve(this.root, prefix) + (prefix.endsWith('/') ? path.sep : '');
+    // The lock keeps a save's candidate out of the collected tree.
+    const { projectRoot, pairs } = await this.withCollectionLock(() => this.collect(signal, collectionPrefix));
     const keyword = input.keyword?.toLowerCase();
     // One filesystem check per file, not per test.
     const paths = new Map<string, Promise<string | undefined>>();
@@ -401,17 +411,18 @@ export class ScriptService {
     }
   }
 
-  /** The collection command; a positional narrows it to one file. */
-  private collectArgs(positional?: string): string[] {
+  /** The collection command; a positional narrows it to one file, a prefix to the files it names. */
+  private collectArgs(positional?: string, prefix?: string): string[] {
     const args = [this.options.cliEntry, 'list', '--reporter', 'json', '--pass-with-no-tests'];
     if (this.options.configPath !== undefined) args.push('--config', this.options.configPath);
+    if (prefix !== undefined) args.push('--prefix', prefix);
     if (positional !== undefined) args.push(positional);
     return args;
   }
 
   /** Collects through the built CLI, bounded in time and output. */
-  private async collect(signal: AbortSignal): Promise<CollectedSelection> {
-    const outcome = await this.collectChild(this.collectArgs(), signal);
+  private async collect(signal: AbortSignal, prefix?: string): Promise<CollectedSelection> {
+    const outcome = await this.collectChild(this.collectArgs(undefined, prefix), signal);
     if (signal.aborted) throw new InfrastructureError('CANCELLED', 'list_test_scripts was cancelled');
     if (outcome.timedOut) throw new ConfigurationError('COLLECTION_ERROR', `list_test_scripts: collection did not finish within ${COLLECT_TIMEOUT_MS} ms`);
     if (outcome.overflow) throw new ConfigurationError('COLLECTION_ERROR', `list_test_scripts: collection output exceeded ${COLLECT_STDOUT_BYTES} bytes`);

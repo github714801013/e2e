@@ -842,7 +842,7 @@ call them only when its `tools` lists them.
 
 | Tool | Does |
 | --- | --- |
-| `list_test_scripts` | Collects the project and groups the tests by file, with paths relative to `--test-root`. Arguments: `prefix`, `keyword`, `limit`. |
+| `list_test_scripts` | Collects the project's tests and groups them by file, with paths relative to `--test-root`. Arguments: `prefix`, `keyword`, `limit`; `prefix` narrows collection, so an unrelated file that fails to import does not fail the call. |
 | `get_test_script` | Returns one file's `path` and `content`. |
 | `save_test_script` | Writes one file atomically. Arguments: `path`, `content`, `overwrite`. |
 
@@ -858,12 +858,15 @@ directories under the root; a read whose parent is missing is
 
 - `list_test_scripts` collects through a child process, because collection
   executes each test file's top-level code. The child has a 30-second deadline
-  and its output is drained but never returned. A failing import or collection
-  error is `COLLECTION_ERROR`, naming the exit status only: the child's stderr
-  belongs to project code, and a test or config that prints a secret would put
-  it in the tool result. Run collection locally for the error text. The
-  collection covers the whole project, as a run does; only files under
-  `--test-root` are listed.
+  and its output is drained but never returned. A failing import in a selected
+  file or another collection error is `COLLECTION_ERROR`, naming the exit
+  status only: the child's stderr belongs to project code, and a test or
+  config that prints a secret would put it in the tool result. Run collection
+  locally for the error text. With `prefix`, collection narrows to the files
+  whose path under `--test-root` starts with it, so an unrelated test file that
+  fails at import is left uncollected and does not fail the call; one under
+  the prefix still does. Without it, the collection covers the whole project,
+  as a run does. Only files under `--test-root` are listed.
 - `save_test_script` writes at most 256 KiB through a temporary file in the
   same directory and a rename, so a reader sees the old file or the new one,
   never half of one. Before the rename it runs a collection with the
