@@ -475,11 +475,14 @@ function collectionPrefix(projectRoot: string, prefix: string): string {
   if (normalized === '') return '';
   const trailingSlash = normalized.endsWith('/');
   const body = trailingSlash ? normalized.slice(0, -1) : normalized;
+  const absolute = path.isAbsolute(body);
+  // A relative prefix with `.` or `..` stays literal; an absolute one is a
+  // resolved path, whose POSIX form starts with the root separator.
   const segments = body.split('/');
-  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return normalized;
+  if (!absolute && segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return normalized;
   let relative: string;
   try {
-    relative = relativeToRoot(projectRoot, path.isAbsolute(body) ? path.normalize(body) : path.resolve(projectRoot, body));
+    relative = relativeToRoot(projectRoot, absolute ? path.normalize(body) : path.resolve(projectRoot, body));
   } catch {
     return normalized;
   }
