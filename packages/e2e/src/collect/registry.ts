@@ -278,6 +278,7 @@ const TEST_OPTION_KEYS: readonly string[] = Object.keys({
   agent: true,
   trace: true,
   video: true,
+  sharedSession: true,
 } satisfies Record<keyof TestOptions, true>);
 
 /** The keys `test.setup()` takes beside `sessions`, which registration lifts out first. */
@@ -307,6 +308,7 @@ const DESCRIBE_OPTION_KEYS: readonly string[] = Object.keys({
   trace: true,
   video: true,
   serial: true,
+  sharedSession: true,
 } satisfies Record<keyof DescribeOptions, true>);
 
 /**

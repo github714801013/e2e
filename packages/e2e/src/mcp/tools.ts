@@ -48,6 +48,8 @@ export interface McpToolSpec<Shape extends z.ZodRawShape = z.ZodRawShape> {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: z.ZodObject<Shape>;
+  /** When set, the result carries `structuredContent` that matches this schema. */
+  readonly outputSchema?: z.ZodObject<z.ZodRawShape> | undefined;
   /** Hint for clients: a tool that changes nothing on the app or disk. */
   readonly readOnly: boolean;
   /** Runs the tool on validated arguments; a thrown error becomes an error result. */
@@ -311,7 +313,22 @@ export function redacting(spec: McpToolSpec): McpToolSpec {
       } catch (cause) {
         result = errorResult(cause);
       }
-      return redactResult(result, (text) => processSecrets.redact(text));
+      const redact = (text: string): string => processSecrets.redact(text);
+      const redacted = redactResult(result, redact);
+      // Structured content reaches the client as model input too, and the
+      // gateway logs fields of it; a secret in an app URL must not slip past
+      // the text redaction.
+      return redacted.structuredContent === undefined
+        ? redacted
+        : { ...redacted, structuredContent: redactValues(redacted.structuredContent, redact) };
     },
   };
+}
+
+/** Every string inside a JSON value through `redact`; objects and arrays keep their shape. */
+function redactValues(value: unknown, redact: (text: string) => string): unknown {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map((item) => redactValues(item, redact));
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValues(item, redact)]));
 }

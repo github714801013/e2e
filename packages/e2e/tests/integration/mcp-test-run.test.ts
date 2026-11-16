@@ -412,7 +412,7 @@ describe('open_session {test}', { timeout: 120_000 }, () => {
       const config = cacheConfig(flowsModel([counter]));
       const sessions = inProcessHost(project, config);
       const before = loopCalls.length;
-      expect(await sessions.open({ test: 'tests/flows.e2e.ts' })).toMatch(/^Test "increments the counter" \(tests\/flows\.e2e\.ts:\d+\) passed/);
+      expect((await sessions.open({ test: 'tests/flows.e2e.ts' })).text).toMatch(/^Test "increments the counter" \(tests\/flows\.e2e\.ts:\d+\) passed/);
       await sessions.close('done');
       const modelCalls = loopCalls.length;
       expect(modelCalls).toBeGreaterThan(before);
@@ -421,7 +421,7 @@ describe('open_session {test}', { timeout: 120_000 }, () => {
       expect(entriesFor(project, counter.title)).toHaveLength(1);
 
       // The next session replays what the first recorded, with no model call.
-      expect(await sessions.open({ test: 'tests/flows.e2e.ts' })).toMatch(/^Test "increments the counter" \(tests\/flows\.e2e\.ts:\d+\) passed/);
+      expect((await sessions.open({ test: 'tests/flows.e2e.ts' })).text).toMatch(/^Test "increments the counter" \(tests\/flows\.e2e\.ts:\d+\) passed/);
       await sessions.close('done');
       expect(loopCalls).toHaveLength(modelCalls);
 
@@ -499,7 +499,7 @@ test('marks', async ({ app }) => {
       cancel.abort();
       await expect(waiting).rejects.toMatchObject({ code: 'CANCELLED' });
       release();
-      expect(await holding).toMatch(/^Test "holds its turn" \(tests\/held\.e2e\.ts:\d+\) passed/);
+      expect((await holding).text).toMatch(/^Test "holds its turn" \(tests\/held\.e2e\.ts:\d+\) passed/);
       await sessions.closeAll('done');
       expect(existsSync(path.join(project.dir, 'marked.txt'))).toBe(false);
     });
@@ -507,8 +507,8 @@ test('marks', async ({ app }) => {
     it('collect and run their tests one at a time, and both pass', async () => {
       const sessions = inProcessHost(project);
       const opened = await Promise.all([sessions.open({ test: 'tests/slow-load.e2e.ts' }), sessions.open({ test: 'tests/quick-load.e2e.ts' })]);
-      expect(opened[0]).toMatch(/^Test "loads slowly" \(tests\/slow-load\.e2e\.ts:\d+\) passed/);
-      expect(opened[1]).toMatch(/^Test "loads quickly" \(tests\/quick-load\.e2e\.ts:\d+\) passed/);
+      expect(opened[0]?.text).toMatch(/^Test "loads slowly" \(tests\/slow-load\.e2e\.ts:\d+\) passed/);
+      expect(opened[1]?.text).toMatch(/^Test "loads quickly" \(tests\/quick-load\.e2e\.ts:\d+\) passed/);
       await sessions.closeAll('done');
     });
   });
