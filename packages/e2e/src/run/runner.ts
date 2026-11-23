@@ -10,7 +10,7 @@ import {
   type ResolvedConfig,
   type ResolvedTarget,
 } from '../config/resolve.ts';
-import { collect, collectInMemory, collectSetups, type Collection } from '../collect/collect.ts';
+import { collect, collectInMemory, collectSetups, type Collection, type UncollectedFile } from '../collect/collect.ts';
 import { DynamicRunInput, type PendingSubmission } from './dynamic-input.ts';
 import { DynamicPlan, dynamicAdditions } from './dynamic-plan.ts';
 import type { ModuleRegistration } from '../collect/registry.ts';
@@ -336,6 +336,12 @@ export interface ListOptions
    * the call.
    */
   prefix?: string | undefined;
+  /**
+   * Keep a selected file's collection failure in `uncollected` instead of
+   * failing the call (`--allow-uncollected`), a listing that reports what it
+   * could not read rather than returning nothing.
+   */
+  allowUncollected?: boolean | undefined;
 }
 
 /**
@@ -371,6 +377,13 @@ export interface ListedPair {
 }
 
 /** The selection `list` returns. */
+/** A selected target and the app address a caller picks it by. */
+export interface ListedTarget {
+  readonly name: string;
+  /** The app's base URL; omitted for a target without one, such as a device app. */
+  readonly url?: string;
+}
+
 export interface ListResult {
   /**
    * Absolute path of the project root the config resolved. Every pair's `file`
@@ -384,6 +397,13 @@ export interface ListResult {
   readonly unmatched: readonly string[];
   /** Selected target names, in config order. */
   readonly targets: readonly string[];
+  /** Each selected target with its app's base URL, so a caller can pick one by address; never credentials. */
+  readonly targetApps: readonly ListedTarget[];
+  /**
+   * Discovered files the collection could not read, with the reason. Empty
+   * unless a narrowed prefix or `allowUncollected` kept them out of the way.
+   */
+  readonly uncollected: readonly UncollectedFile[];
 }
 
 /**
@@ -392,7 +412,8 @@ export interface ListResult {
  * in selection order, one per test, target, and agent; repeats are not
  * expanded. `projectRoot` is where the config resolved and every `file` is
  * relative to it; `unmatched` is the positional arguments that selected no
- * file, `targets` the selected target names in config order. An empty selection
+ * file, `targets` the selected target names in config order, `targetApps`
+ * those names with each app's base URL for picking a target by address. An empty selection
  * throws `NO_TESTS` unless `passWithNoTests`. Config, collection, and
  * selection failures throw the same classified error `run` records. Each
  * call imports the test files again, so a later call sees an edit. With
@@ -422,7 +443,7 @@ export async function listSelection(options: ListOptions, notice: (message: stri
   };
   const config = await (processOutput === undefined ? loadConfig() : processOutput.withholdDuring(loadConfig));
   const { changedSince } = runOptions;
-  const collection = await collect(config, runOptions.files, undefined, runOptions.prefix);
+  const collection = await collect(config, runOptions.files, undefined, runOptions.prefix, runOptions.allowUncollected === true);
   const inputs = await selectionInputs(runOptions, config);
   const first = select(collection, config, inputs.filters, runOptions.passWithNoTests !== undefined ? { passWithNoTests: runOptions.passWithNoTests } : {});
   const selection =
@@ -434,6 +455,11 @@ export async function listSelection(options: ListOptions, notice: (message: stri
     pairs: selection.pairs.map((pair) => toListedPair(config.projectRoot, pair)),
     unmatched: collection.unmatchedPositionals,
     targets: selection.perTarget.map((entry) => entry.target.name),
+    targetApps: selection.perTarget.map(({ target }) => ({
+      name: target.name,
+      ...(target.app.base === undefined ? {} : { url: target.app.base.href }),
+    })),
+    uncollected: collection.uncollected,
   };
 }
 
@@ -1425,6 +1451,8 @@ type SelectionRunOptions = Pick<
 > & {
   /** A literal path prefix, from `list`'s `--prefix`, that narrows collection. */
   prefix?: string | undefined;
+  /** From `list`'s `--allow-uncollected`: keep a failure out of the way instead of failing. */
+  allowUncollected?: boolean | undefined;
 };
 
 /** The public `list` bag as the options config loading and selection already take. */

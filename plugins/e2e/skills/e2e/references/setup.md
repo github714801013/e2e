@@ -335,9 +335,10 @@ session: {
   encrypted with AES-256-GCM and a key file beside it (owner-only), outside
   `output`. There is no expiry: `check` decides per test. Delete the
   directory to force a fresh sign-in.
-- The key is the account, the app's `environment`, and `app.identity` (else
-  its origin): renaming a target or changing a port keeps the login, another
-  account or environment gets its own.
+- The key is the account, the app's `environment`, `app.identity` (else its
+  origin), and the target's name: changing a port keeps the login, while
+  renaming a target signs it in once more; another account, target, or
+  environment gets its own.
 - `login` is retried once. A `login` or `check` that throws, or a state that
   still fails `check` right after a sign-in, stops the run
   (`SESSION_LOGIN_FAILED`, `SESSION_CHECK_FAILED`, exit 2) and saves nothing.

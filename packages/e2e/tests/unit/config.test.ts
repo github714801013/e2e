@@ -1290,36 +1290,26 @@ describe('shared login session config', () => {
     };
   }
 
-  const keysOf = (targets: Target[], credentials: Record<string, typeof ACCOUNT> = { tester: ACCOUNT, reviewer: REVIEWER }) =>
-    resolve({ targets, credentials }).targets.map((target) => target.session?.key);
+  const keyOf = (target: Target): string | undefined =>
+    resolve({ targets: [target], credentials: { tester: ACCOUNT, reviewer: REVIEWER } }).targets[0]?.session?.key;
 
-  it('keys a session by the app, its environment, and the account, never by the target name', () => {
-    const [web, renamed] = keysOf([sessionTarget('web'), sessionTarget('renamed')]);
-    expect(web).toBeDefined();
-    expect(renamed).toBe(web);
-
-    const [tester, reviewer] = keysOf([
-      sessionTarget('web'),
-      { ...sessionTarget('reviewer-target'), session: { ...sessionTarget('reviewer-target').session!, account: 'reviewer' } },
-    ]);
-    expect(reviewer).not.toBe(tester);
-
-    const [production, test] = keysOf([
-      sessionTarget('web', { url: 'http://127.0.0.1:3000', environment: 'production' }),
-      sessionTarget('web-staging'),
-    ]);
-    expect(production).not.toBe(test);
-
-    const [here, elsewhere] = keysOf([sessionTarget('web'), sessionTarget('web-other', { url: 'http://127.0.0.1:3001' })]);
-    expect(elsewhere).not.toBe(here);
+  it('keys a session by the app, its environment, the account, and the target name', () => {
+    const base = keyOf(sessionTarget('web'));
+    expect(base).toBeDefined();
+    // Two targets on one app keep separate envelopes, even under one account.
+    expect(keyOf(sessionTarget('renamed'))).not.toBe(base);
+    // The account, the environment, and the app identity still separate them.
+    expect(
+      keyOf({ ...sessionTarget('web'), session: { ...sessionTarget('web').session!, account: 'reviewer' } }),
+    ).not.toBe(base);
+    expect(keyOf(sessionTarget('web', { url: 'http://127.0.0.1:3000', environment: 'production' }))).not.toBe(base);
+    expect(keyOf(sessionTarget('web', { url: 'http://127.0.0.1:3001' }))).not.toBe(base);
   });
 
-  it('keeps the key on the declared app identity, so another port or URL still shares the login', () => {
-    const [first, second] = keysOf([
-      sessionTarget('web', { url: 'http://127.0.0.1:3000', identity: 'shop' }),
-      sessionTarget('web-alt', { url: 'http://localhost:4000', identity: 'shop' }),
-    ]);
-    expect(second).toBe(first);
+  it('keeps the key on the declared app identity and the target name, so another port or URL still shares the login', () => {
+    expect(keyOf(sessionTarget('web', { url: 'http://localhost:4000', identity: 'shop' }))).toBe(
+      keyOf(sessionTarget('web', { url: 'http://127.0.0.1:3000', identity: 'shop' })),
+    );
   });
 
   it('keeps the login out of the config digest', () => {

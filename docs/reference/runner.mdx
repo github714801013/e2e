@@ -254,6 +254,7 @@ process sees an edit.
 | `cwd` | `'apps/web'` | `string` | the current working directory |
 | `files` | `['tests/', 'signup.e2e.ts:12']` | `readonly string[]` | the configured suite |
 | `prefix` | `'tests/oa-m'` | `string` | - |
+| `allowUncollected` | `true` | `boolean` | `false` |
 | `tags`, `tagMode`, `excludeTags` | `{ tags: ['smoke'], tagMode: 'all' }` | `readonly string[]`, `'any' \| 'all'` | - |
 | `grep`, `grepInvert` | `[/checkout/]` | `readonly RegExp[]` | - |
 | `lastFailed` | `true` | `boolean` | - |
@@ -268,6 +269,9 @@ process sees an edit.
   `file:line`.
 - `prefix` narrows collection to the literal path prefix, as the `--prefix`
   flag of `e2e list` does: files outside it that fail to collect are tolerated.
+- `allowUncollected` keeps a selected file's collection failure in the
+  result's `uncollected` instead of throwing, as `e2e list
+  --allow-uncollected` does.
 - `tags`, `tagMode`, and `excludeTags` are the `--tag`, `--tag-mode`, and
   `--exclude-tag` filters.
 - `grep` and `grepInvert`: a test's describe titles and title, joined by
@@ -285,7 +289,7 @@ process sees an edit.
 
 ##### Result
 
-`ListResult` is `{ projectRoot, pairs, unmatched, targets }`.
+`ListResult` is `{ projectRoot, pairs, unmatched, targets, targetApps, uncollected }`.
 
 - `projectRoot` is the absolute directory the config resolved to. Every
   pair's `file` is relative to it, which differs from the `cwd` you passed
@@ -295,6 +299,15 @@ process sees an edit.
 - `unmatched` is the positional arguments, as written, that selected no
   discovered file.
 - `targets` is the selected target names, in config order.
+- `targetApps` is those targets with each app's base URL, each `{ name, url }`
+  with `url` omitted for a target that has none, such as a device app. Use it
+  to pick a target by the page address a test covers; credentials never
+  appear here.
+- `uncollected` is every discovered file collection could not read, each
+  `{ file, reason }` with `file` relative to `projectRoot`, whatever `prefix`
+  selected. It is empty unless the collection failed somewhere: positionals or
+  `prefix` keep an unselected file's failure from failing the call, and
+  `allowUncollected` keeps a selected file's failure there too.
 
 | Field | Meaning |
 | --- | --- |

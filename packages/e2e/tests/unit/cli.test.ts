@@ -81,7 +81,7 @@ beforeEach(() => {
   runMock.mockReset();
   runMock.mockResolvedValue({ exitCode: 0, report: sampleReport() });
   listMock.mockReset();
-  listMock.mockResolvedValue({ projectRoot: '/project', pairs: [] });
+  listMock.mockResolvedValue({ projectRoot: '/project', pairs: [], targetApps: [] });
   initMock.mockReset();
   initMock.mockResolvedValue(initOutcome(0));
   watchMock.mockReset();
@@ -557,7 +557,7 @@ describe('e2e list', () => {
   }
 
   it('prints one line per pair and exits 0 without running', async () => {
-    listMock.mockResolvedValue({ projectRoot: '/project', pairs });
+    listMock.mockResolvedValue({ projectRoot: '/project', pairs, targetApps: [] });
     await invoke('list');
     expect(runMock).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(0);
@@ -582,11 +582,12 @@ describe('e2e list', () => {
     expect(stderr.endsWith('(add --help for usage)\n')).toBe(true);
   });
 
-  it('prints { projectRoot, pairs } with --reporter json', async () => {
-    listMock.mockResolvedValue({ projectRoot: '/project', pairs });
+  it('prints { projectRoot, pairs, targets, uncollected } with --reporter json', async () => {
+    const targetApps = [{ name: 'web', url: 'https://example.test' }, { name: 'device' }];
+    listMock.mockResolvedValue({ projectRoot: '/project', pairs, targetApps, uncollected: [] });
     await invoke('list', '--reporter', 'json');
     expect(process.exitCode).toBe(0);
-    const printed = { projectRoot: '/project', pairs: pairs.filter((pair) => pair.disposition !== 'filtered') };
+    const printed = { projectRoot: '/project', pairs: pairs.filter((pair) => pair.disposition !== 'filtered'), targets: targetApps, uncollected: [] };
     expect(JSON.parse(written(stdoutSpy))).toEqual(JSON.parse(JSON.stringify(printed)));
     expect(written(stdoutSpy)).not.toContain('skipReason');
   });
@@ -608,6 +609,7 @@ describe('e2e list', () => {
       '--changed-since',
       'origin/main',
       '--pass-with-no-tests',
+      '--allow-uncollected',
     );
     expect(lastListOptions()).toEqual({
       files: ['tests/a.e2e.ts'],
@@ -617,6 +619,7 @@ describe('e2e list', () => {
       tagMode: 'all',
       changedSince: 'origin/main',
       passWithNoTests: true,
+      allowUncollected: true,
     });
     expect(written(stdoutSpy)).toBe('');
 

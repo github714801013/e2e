@@ -7,6 +7,7 @@
  * whole process: user code runs here and may print a secret.
  */
 
+import path from 'node:path';
 import { Writable } from 'node:stream';
 import { isAbandonedRejection } from '../internal/abandoned.ts';
 import { ConfigurationError, errorMessage, exitCodeForCategory, classifyError } from '../internal/errors.ts';
@@ -198,11 +199,18 @@ async function mcpHttp(version: string, options: McpCommandOptions): Promise<num
   const authTimeoutMs = Number(process.env['E2E_HTTP_MCP_AUTH_TIMEOUT_MS']);
   const retentionMs = Number(process.env['E2E_HTTP_MCP_RETENTION_MS']);
   const startupTimeoutMs = Number(process.env['E2E_HTTP_MCP_STARTUP_TIMEOUT_MS']);
+  const adminToken = (process.env['E2E_HTTP_MCP_ADMIN_TOKEN'] ?? '').trim() || undefined;
   try {
     // The gateway has no global session cap: the per-domain quota bounds the
     // browsers, and a flag that silently stopped applying would mislead.
     if (options.maxSessions !== undefined) {
       throw new ConfigurationError('INVALID_ARGUMENT', '--max-sessions applies to stdio; over --http, use --max-sessions-per-domain');
+    }
+    if (adminToken !== undefined && (adminToken.length < 32 || /\s/.test(adminToken))) {
+      throw new ConfigurationError(
+        'INVALID_ARGUMENT',
+        'E2E_HTTP_MCP_ADMIN_TOKEN must be at least 32 characters with no whitespace',
+      );
     }
     const handle = await serveHttpMcp({
       host: options.host ?? '127.0.0.1',
@@ -226,6 +234,9 @@ async function mcpHttp(version: string, options: McpCommandOptions): Promise<num
       cwd: process.cwd(),
       configPath: options.config,
       target: options.target,
+      accountsDir: process.env['E2E_HTTP_MCP_ACCOUNTS_DIR'] ?? path.join(process.cwd(), '.e2e', 'accounts'),
+      baseTargetsFile: process.env['E2E_TARGETS_BASE_FILE'] ?? path.join(process.cwd(), '.e2e', 'targets.json'),
+      ...(adminToken === undefined ? {} : { adminToken }),
       headed: options.headed === true,
       version,
       env: process.env,

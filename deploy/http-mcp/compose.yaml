@@ -1,0 +1,52 @@
+name: e2e-http-mcp
+
+services:
+  gateway:
+    image: ${E2E_IMAGE:?请先执行构建与部署脚本}
+    init: true
+    user: "1000:1000"
+    restart: unless-stopped
+    stop_grace_period: 150s
+    # 入口白名单必须包含客户端实际访问的 Host；镜像 CMD 里的默认值只有 10.1.14.158:18091。
+    command:
+      - node
+      - node_modules/e2e/dist/cli/bin.js
+      - mcp
+      - --http
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "3001"
+      - --allow-host
+      - 10.1.14.158:18091,192.168.254.50:30004,127.0.0.1:3001,localhost:3001
+      - --allow-origin
+      - http://10.1.14.158:18091,http://192.168.254.50:30004,http://127.0.0.1:3001,http://localhost:3001
+      - --max-workers
+      - "4"
+      - --max-runs
+      - "2"
+    ports:
+      - "10.1.14.158:18091:3001"
+    env_file:
+      - .secrets.env
+    environment:
+      E2E_HTTP_MCP_ACCOUNTS_DIR: /run/e2e-accounts
+      E2E_TARGETS_BASE_FILE: /run/e2e-targets/targets.json
+    volumes:
+      - ./tests:/app/tests
+      - ./state:/app/.e2e
+      - ./accounts:/run/e2e-accounts:rw
+      - ./targets:/run/e2e-targets:ro
+    shm_size: "1gb"
+    cpus: 4
+    mem_limit: 8g
+    pids_limit: 512
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

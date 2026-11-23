@@ -295,10 +295,20 @@ describe('HTTP MCP job store', () => {
   it('declares no workers or arbitrary command argument on run_test', () => {
     const runTest = JOB_TOOL_DEFINITIONS.find((tool) => tool.name === 'run_test');
     expect(runTest?.inputSchema).toMatchObject({
-      properties: { targetId: expect.any(Object), testFiles: expect.any(Object), idempotencyKey: expect.any(Object) },
+      properties: {
+        targetId: expect.any(Object),
+        accountDescription: expect.any(Object),
+        testFiles: expect.any(Object),
+        idempotencyKey: expect.any(Object),
+      },
       additionalProperties: false,
     });
-    expect(Object.keys(runTest?.inputSchema.properties ?? {})).toEqual(['targetId', 'testFiles', 'idempotencyKey']);
+    expect(Object.keys(runTest?.inputSchema.properties ?? {})).toEqual([
+      'targetId',
+      'accountDescription',
+      'testFiles',
+      'idempotencyKey',
+    ]);
     expect(JOB_TOOL_DEFINITIONS.map((tool) => tool.name)).toEqual(['run_test', 'get_test_status', 'get_test_report', 'list_test_artifacts']);
   });
 });

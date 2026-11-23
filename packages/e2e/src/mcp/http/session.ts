@@ -27,6 +27,7 @@ import {
   type HttpMcpTool,
   type NativeMcpTool,
 } from './config.ts';
+import type { AccountStore } from './accounts.ts';
 import { JOB_TOOL_DEFINITIONS, callJobTool } from './job-tools.ts';
 import type { JobService } from './jobs.ts';
 import { SCRIPT_TOOL_DEFINITIONS, type ScriptService } from './scripts.ts';
@@ -88,6 +89,7 @@ export class HttpSession {
     readonly token: HttpMcpToken,
     private readonly scripts: ScriptService,
     private readonly jobs: JobService | undefined,
+    private readonly accounts: AccountStore | undefined,
     private readonly hooks: SessionHooks,
     id: string = randomUUID(),
   ) {
@@ -159,7 +161,11 @@ export class HttpSession {
       const tools: Tool[] = [];
       if (this.usesChild) {
         const { tools: native } = await (await this.childLink()).client.listTools();
-        tools.push(...native.filter((tool) => isNativeMcpTool(tool.name) && this.allowedTools.has(tool.name)));
+        tools.push(
+          ...native
+            .filter((tool) => isNativeMcpTool(tool.name) && this.allowedTools.has(tool.name))
+            .map((tool) => (tool.name === 'open_session' ? withAccountDescription(tool) : tool)),
+        );
       }
       tools.push(...SCRIPT_TOOL_DEFINITIONS.filter((tool) => this.allowedTools.has(tool.name as HttpMcpTool)));
       tools.push(...JOB_TOOL_DEFINITIONS.filter((tool) => this.allowedTools.has(tool.name as HttpMcpTool)));
@@ -197,7 +203,10 @@ export class HttpSession {
       if (!isNativeMcpTool(name) || !this.allowedTools.has(name)) return errorResult(denied(name));
       try {
         const child = await this.childLink();
-        const result = await child.client.callTool(request.params, { signal: context.mcpReq.signal, timeout: PROXY_TIMEOUT_MS });
+        // The pool lives in the gateway: the child is handed only the resolved
+        // target name, never the account description or its record.
+        const params = name === 'open_session' ? await this.rewriteOpenSession(request.params) : request.params;
+        const result = await child.client.callTool(params, { signal: context.mcpReq.signal, timeout: PROXY_TIMEOUT_MS });
         this.hooks.onNativeResult(this.id, name, result);
         return result;
       } catch (cause) {
@@ -218,12 +227,42 @@ export class HttpSession {
     return server;
   }
 
+  /**
+   * Replaces `accountDescription` with the one target it selects. The child
+   * sees a plain `open_session { target }`, exactly as if the caller had named
+   * the target; a description and a target at once cannot both be honored.
+   */
+  private async rewriteOpenSession(params: ToolCallParams): Promise<ToolCallParams> {
+    const args = params.arguments;
+    if (args === undefined || args['accountDescription'] === undefined) return params;
+    if (this.accounts === undefined) {
+      throw new ConfigurationError('INVALID_ARGUMENT', 'accountDescription needs an account pool on this gateway');
+    }
+    // Naming both is the conflict, whatever the description holds: an empty
+    // description beside a target is still two selectors.
+    if (args['target'] !== undefined) {
+      throw new ConfigurationError('ACCOUNT_SELECTION_CONFLICT', 'open_session takes target or accountDescription, not both');
+    }
+    const description = args['accountDescription'];
+    if (typeof description !== 'string' || description.trim() === '') {
+      throw new ConfigurationError('ACCOUNT_INVALID', 'open_session needs accountDescription as a non-empty string when given');
+    }
+    const account = await this.accounts.resolve(description);
+    const rewritten: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(args)) {
+      if (key !== 'accountDescription') rewritten[key] = value;
+    }
+    rewritten['target'] = account.name;
+    return { ...params, arguments: rewritten };
+  }
+
   private async spawnChild(): Promise<ChildLink> {
+    const accountEnv = this.accounts === undefined ? {} : await this.accounts.childEnvironment();
     const transport = new StdioClientTransport({
       command: process.execPath,
       args: childArgs(this.options),
       cwd: this.options.cwd,
-      env: childEnvironment(this.options.env),
+      env: { ...childEnvironment(this.options.env), ...accountEnv },
       stderr: 'pipe',
     });
     const client = new Client({ name: 'e2e-http-gateway', version: this.options.version });
@@ -250,6 +289,31 @@ export class HttpSession {
 
 function denied(name: string): ConfigurationError {
   return new ConfigurationError('POLICY_DENIED', `tool "${name}" is not permitted for this client`);
+}
+
+type ToolCallParams = Parameters<Client['callTool']>[0];
+
+/** The native `open_session` schema, with the gateway's account selector added. */
+function withAccountDescription(tool: Tool): Tool {
+  const schema = tool.inputSchema;
+  if (typeof schema !== 'object' || schema === null) return tool;
+  const existing = typeof schema.properties === 'object' && schema.properties !== null ? schema.properties : {};
+  const inputSchema: unknown = {
+    ...schema,
+    properties: {
+      ...existing,
+      accountDescription: {
+        type: 'string',
+        maxLength: 200,
+        description: 'Words selecting one enabled account pool account; cannot be combined with target.',
+      },
+    },
+  };
+  return {
+    ...tool,
+    description: `${tool.description ?? ''} accountDescription selects one enabled account pool account by words from its description, instead of target.`.trim(),
+    inputSchema: inputSchema as Tool['inputSchema'],
+  };
 }
 
 function childArgs(options: HttpMcpOptions): string[] {

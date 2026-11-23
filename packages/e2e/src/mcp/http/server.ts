@@ -12,6 +12,8 @@ import { pipeline } from 'node:stream/promises';
 import { isInitializeRequest } from '@modelcontextprotocol/server';
 import { ConfigurationError, errorMessage } from '../../internal/errors.ts';
 import { processSecrets } from '../../run/secrecy.ts';
+import { AccountStore } from './accounts.ts';
+import { handleAdminRequest } from './accounts-admin.ts';
 import {
   authenticate,
   clientAddress,
@@ -64,6 +66,10 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
     });
   });
 
+  const accounts = new AccountStore({
+    directory: options.accountsDir,
+    baseTargetsFile: options.baseTargetsFile,
+  });
   // Created before binding: a test root the script tools cannot use is a
   // configuration failure, not something to discover on the first call.
   const scripts = await ScriptService.create({
@@ -71,6 +77,7 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
     configPath: options.configPath,
     cliEntry: options.cliEntry,
     env: options.env,
+    accounts,
     log: options.log,
   });
   // Only a gateway that can hand out a job tool owns the job store and the
@@ -80,6 +87,7 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
         cwd: options.cwd,
         configPath: options.configPath,
         env: options.env,
+        accounts,
         maxWorkers: options.maxWorkers ?? DEFAULT_MAX_WORKERS,
         maxRuns: options.maxRuns ?? DEFAULT_MAX_RUNS,
         runTimeoutMs: options.runTimeoutMs ?? RUN_TIMEOUT_MS,
@@ -203,6 +211,17 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
       });
       return;
     }
+    // The account pool's admin API is gated by its own credential, never by an
+    // MCP token. When the credential is unset the path falls through to 404.
+    if (
+      await handleAdminRequest(request, response, pathname, {
+        token: options.adminToken,
+        accounts,
+        log: options.log,
+      })
+    ) {
+      return;
+    }
     // `<MCP path>/artifacts/<jobId>/<index>` is the one route beside the MCP
     // endpoint: a tool returns the URL, and a plain GET streams the bytes.
     const artifactsPrefix = `${options.path}/artifacts/`;
@@ -274,7 +293,7 @@ export async function serveHttpMcp(options: HttpMcpOptions): Promise<HttpMcpHand
     body: Buffer | undefined,
     reusedId?: string,
   ): Promise<void> {
-    const session = new HttpSession(options, token, scripts, jobs, hooks, reusedId);
+    const session = new HttpSession(options, token, scripts, jobs, accounts, hooks, reusedId);
     // Hold the slot before the first await, so two concurrent initializes
     // cannot both pass the limit check. A duplicate re-initialize cannot
     // replace a live session, and one still closing owns its id until its

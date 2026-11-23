@@ -4,10 +4,11 @@
  * lock when the saved state no longer checks out.
  */
 
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { defineEngine, LOCATOR_ACTION_KINDS, type EngineHandle } from '../../src/engine/index.ts';
+import { canonicalDigest } from '../../src/internal/ids.ts';
 import type { E2EConfig, SessionFixtures } from '../../src/index.ts';
 import { assertValidReport } from '../helpers/report-schema.ts';
 import { createProject, runExisting, runProjectWithConfigFile, type FixtureProject } from '../helpers/run-project.ts';
@@ -346,6 +347,73 @@ test('second', async () => {});`,
       expect(two.exitCode, JSON.stringify(two.report.run.errors)).toBe(0);
       expect([alpha.logins, beta.logins]).toEqual([0, 0]);
       expect([alpha.checks, beta.checks]).toEqual([1, 1]);
+    });
+  }, 120_000);
+
+  it('keeps separate envelopes for two targets on one app and account', async () => {
+    await withProject(async (project) => {
+      const alpha: LoginState = { signedIn: false, logins: 0, checks: 0 };
+      const beta: LoginState = { signedIn: false, logins: 0, checks: 0 };
+      const config = (): Partial<E2EConfig> => ({
+        targets: [
+          { ...target(alpha), name: 'alpha' },
+          { ...target(beta), name: 'beta' },
+        ],
+        credentials: { tester: { username: 'tester@example.test', password: 'pw-shared-login' } },
+        cache: 'off',
+      });
+      const one = await runExisting(project, { config: config() });
+      expect(one.exitCode, JSON.stringify(one.report.run.errors)).toBe(0);
+      expect([alpha.logins, beta.logins]).toEqual([1, 1]);
+      expect(envelopes(project)).toHaveLength(2);
+
+      alpha.signedIn = false;
+      beta.signedIn = false;
+      alpha.logins = 0;
+      beta.logins = 0;
+      const two = await runExisting(project, { config: config() });
+      expect(two.exitCode, JSON.stringify(two.report.run.errors)).toBe(0);
+      expect([alpha.logins, beta.logins]).toEqual([0, 0]);
+      expect(envelopes(project)).toHaveLength(2);
+    });
+  }, 120_000);
+
+  it('does not reuse an envelope keyed before the target name joined the key', async () => {
+    await withProject(async (project) => {
+      const state: LoginState = { signedIn: false, logins: 0, checks: 0 };
+      const config = (): Partial<E2EConfig> => ({
+        targets: [target(state)],
+        credentials: { tester: { username: 'tester@example.test', password: 'pw-shared-login' } },
+        cache: 'off',
+      });
+      const one = await runExisting(project, { config: config() });
+      expect(one.exitCode, JSON.stringify(one.report.run.errors)).toBe(0);
+      expect(state.logins).toBe(1);
+      const [current] = envelopes(project);
+      expect(current).toBeDefined();
+      const newKey = current!.replace(/\.json$/, '');
+      const oldKey = canonicalDigest({ app: APP_URL, environment: 'test', account: 'tester' });
+      expect(newKey).not.toBe(oldKey);
+
+      // An upgraded project holds the pre-upgrade envelope under the old key.
+      const directory = path.join(project.dir, '.e2e', 'sessions', 'shared');
+      copyFileSync(path.join(directory, current!), path.join(directory, `${oldKey}.json`));
+      rmSync(path.join(directory, current!));
+      state.signedIn = false;
+      state.logins = 0;
+      state.checks = 0;
+
+      const two = await runExisting(project, { config: config() });
+      expect(two.exitCode, JSON.stringify(two.report.run.errors)).toBe(0);
+      // The old envelope is ignored: one login, then a new envelope beside it.
+      expect(state.logins).toBe(1);
+      expect(envelopes(project).toSorted()).toEqual([`${newKey}.json`, `${oldKey}.json`].toSorted());
+
+      state.signedIn = false;
+      state.logins = 0;
+      const three = await runExisting(project, { config: config() });
+      expect(three.exitCode, JSON.stringify(three.report.run.errors)).toBe(0);
+      expect(state.logins).toBe(0);
     });
   }, 120_000);
 

@@ -338,9 +338,10 @@ session: {
   when it fails, `login` runs under an exclusive lock shared by every worker,
   and the new state is saved only after `check` passes.
 - The state lives in `.e2e/sessions/shared/` under the project root, keyed by
-  the app identity (else its origin), its `environment`, and the account:
-  neither the target's name nor the run's ports change the key. It is
-  encrypted, and it is not part of [`output`](#output).
+  the app identity (else its origin), its `environment`, the account, and the
+  target's name: the run's ports do not change the key, while renaming a
+  target signs it in once more. It is encrypted, and it is not part of
+  [`output`](#output).
 - The target needs an app `url`, and its engine needs the state capability.
   `web()` has it; the mobile engine does not yet, and a `session` there is
   `UNSUPPORTED_CAPABILITY` at config load.
@@ -417,7 +418,7 @@ url: 'http://localhost:3000',
 
 - WHATWG-normalized; no userinfo, query, or fragment.
 - A missing scheme becomes `https://`, or `http://` for a loopback host.
-- Plain HTTP is accepted for loopback hosts only.
+- Plain HTTP is accepted for loopback and private network hosts only.
 - Port `0` on `127.0.0.1` or `[::1]` asks for a [free port](#free-ports).
 - Its origin scopes engine request credentials, and its site scopes observed
   frames: see [the app's site](#the-apps-site).

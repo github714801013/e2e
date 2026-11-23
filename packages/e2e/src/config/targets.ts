@@ -111,7 +111,7 @@ export function resolveTargets(
     const engine = target.engine === undefined ? undefined : protocolEngine(target.engine);
     const declaredApp = checkTargetApp(name, engine, target.app);
     const app = resolveTargetApp(name, declaredApp, projectRoot);
-    const session = resolveSession(where, target.session, app, target.engine, credentials);
+    const session = resolveSession(name, where, target.session, app, target.engine, credentials);
     return {
       name,
       index,
@@ -131,10 +131,12 @@ const SESSION_KEYS: ReadonlySet<string> = new Set(['account', 'login', 'check'])
 /**
  * Resolves the shared login a target declares. The app must be addressable
  * and the engine must capture and restore state; the account must name a
- * configured credential. The store key is the app's identity and the
- * account, so a port a run assigned never changes it.
+ * configured credential. The store key is the app's identity, the account,
+ * and the target's name, so a port a run assigned never changes it and two
+ * accounts on one app never share an envelope.
  */
 function resolveSession(
+  name: string,
   where: string,
   declared: unknown,
   app: ResolvedApp,
@@ -187,7 +189,7 @@ function resolveSession(
     login: login as TargetSessionConfig['login'],
     check: check as TargetSessionConfig['check'],
     credential: credentialHandle(credential),
-    key: canonicalDigest({ app: app.identity ?? app.base.origin, environment: app.environment, account }),
+    key: canonicalDigest({ app: app.identity ?? app.base.origin, environment: app.environment, account, target: name }),
   };
 }
 

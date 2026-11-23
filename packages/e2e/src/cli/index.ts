@@ -14,7 +14,8 @@ import { packageVersion } from '../internal/package-version.ts';
 import { MAX_TIMER_MS } from '../internal/time.ts';
 import { classifyError, exitCodeForCategory } from '../internal/errors.ts';
 import type { Shard, TagMode } from '../collect/select.ts';
-import { listSelection, run, type ListedPair, type RunOptions, type RunOutcome } from '../run/runner.ts';
+import { listSelection, run, type ListedPair, type ListedTarget, type RunOptions, type RunOutcome } from '../run/runner.ts';
+import type { UncollectedFile } from '../collect/collect.ts';
 import { claimRunnerOutput } from './run-output.ts';
 import { writeTerminal } from '../run/process-output.ts';
 import { STEP_BOUNDS, TIMEOUT_BOUNDS } from '../explore/bounds.ts';
@@ -973,11 +974,15 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
     .option(
       '--prefix <prefix>',
       'only discovered files under this literal path prefix, relative to the project root or absolute inside it; an unrelated file that fails to collect no longer fails the list',
+    )
+    .option(
+      '--allow-uncollected',
+      'a selected file that fails to collect is reported under uncollected in --reporter json instead of failing the list',
     );
   selectionOptions(listCommand)
     .optionsGroup('Output:')
     .addOption(
-      new Option('--reporter <id>', 'list prints one line per pair; json prints { projectRoot, pairs: [...] }; a pair a test filter left out has filter and reason')
+      new Option('--reporter <id>', 'list prints one line per pair; json prints { projectRoot, pairs: [...], targets: [{ name, url }] }; a pair a test filter left out has filter and reason')
         .choices(LIST_REPORTERS)
         .default('list'),
     )
@@ -1005,6 +1010,7 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
           config?: string;
           target?: string[];
           prefix?: string;
+          allowUncollected?: boolean;
           reporter: ListReporter;
         },
         command: Command,
@@ -1015,13 +1021,16 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
         if (options.reporter === 'json') output.keepStdoutForReport();
         let pairs: readonly ListedPair[];
         let projectRoot: string;
+        let targetApps: readonly ListedTarget[];
+        let uncollected: readonly UncollectedFile[];
         try {
-          ({ pairs, projectRoot } = await listSelection(
+          ({ pairs, projectRoot, targetApps, uncollected } = await listSelection(
             {
               files,
               config: options.config,
               targets: options.target,
               prefix: options.prefix,
+              allowUncollected: options.allowUncollected,
               ...selectionRunOptions(options),
             },
             (message) => process.stderr.write(`${bounded(message)}\n`),
@@ -1035,7 +1044,7 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
         output.end();
         // `list` includes pairs a selection flag removed. The command prints the ones that run or are skipped, and those a test filter left out.
         const listed = pairs.filter((pair) => pair.disposition === 'run' || pair.disposition === 'skip' || pair.filter !== undefined);
-        if (options.reporter === 'json') writeTerminal('stdout', `${JSON.stringify({ projectRoot, pairs: listed }, null, 2)}\n`);
+        if (options.reporter === 'json') writeTerminal('stdout', `${JSON.stringify({ projectRoot, pairs: listed, targets: targetApps, uncollected }, null, 2)}\n`);
         else process.stdout.write(listed.map((pair) => `${formatListedPair(pair)}\n`).join(''));
         process.exitCode = 0;
       },

@@ -18,11 +18,16 @@ const MAX_KEY_CHARS = 200;
 const RUN_TEST_SCHEMA: Tool = {
   name: 'run_test',
   description:
-    'Queue test files from the configured project on one target and return a job id at once. The files are collected and then run on the target\'s current run; calls made while it runs join the same run. Poll get_test_status, then read get_test_report. Repeating an idempotencyKey returns the first job instead of queueing another. CAPACITY_EXCEEDED means the gateway or the run is full; retry after a job finishes.',
+    'Queue test files from the configured project on one target and return a job id at once. Name the target with targetId, or with accountDescription: the business words of one account pool account, where every word must occur in its description and exactly one enabled account must match. The files are collected and then run on the target\'s current run; calls made while it runs join the same run. Poll get_test_status, then read get_test_report. Repeating an idempotencyKey returns the first job instead of queueing another. CAPACITY_EXCEEDED means the gateway or the run is full; retry after a job finishes.',
   inputSchema: {
     type: 'object',
     properties: {
-      targetId: { type: 'string', maxLength: MAX_TARGET_CHARS, description: 'A target the project config declares.' },
+      targetId: { type: 'string', maxLength: MAX_TARGET_CHARS, description: 'A target the project config declares; cannot be combined with accountDescription.' },
+      accountDescription: {
+        type: 'string',
+        maxLength: MAX_TARGET_CHARS,
+        description: 'Words selecting one enabled account pool account; cannot be combined with targetId.',
+      },
       testFiles: {
         type: 'array',
         maxItems: MAX_IPC_FILES,
@@ -36,7 +41,7 @@ const RUN_TEST_SCHEMA: Tool = {
         description: 'A client-chosen key: the same key and request returns the same job.',
       },
     },
-    required: ['targetId', 'testFiles'],
+    required: ['testFiles'],
     additionalProperties: false,
   },
   // Collection and the tests import and run project code.
@@ -116,11 +121,25 @@ export async function callJobTool(
   }
 }
 
-/** `run_test` arguments: one target and one to fifty project-relative files. */
+/** `run_test` arguments: one target or account description, and one to fifty project-relative files. */
 function parseRunTest(value: unknown): JobSubmission {
-  const args = closed(value, ['targetId', 'testFiles', 'idempotencyKey'], 'run_test');
+  const args = closed(value, ['targetId', 'accountDescription', 'testFiles', 'idempotencyKey'], 'run_test');
   const targetId = args['targetId'];
-  if (typeof targetId !== 'string' || targetId === '') throw invalid('run_test needs targetId as a non-empty string');
+  const accountDescription = args['accountDescription'];
+  // Naming both is the conflict, whatever either value holds: an empty
+  // description beside a target is still two selectors.
+  if (targetId !== undefined && accountDescription !== undefined) {
+    throw new ConfigurationError('ACCOUNT_SELECTION_CONFLICT', 'run_test takes targetId or accountDescription, not both');
+  }
+  if (targetId !== undefined && (typeof targetId !== 'string' || targetId === '')) {
+    throw invalid('run_test needs targetId as a non-empty string when given');
+  }
+  if (accountDescription !== undefined && (typeof accountDescription !== 'string' || accountDescription.trim() === '')) {
+    throw invalid('run_test needs accountDescription as a non-empty string when given');
+  }
+  if (targetId === undefined && accountDescription === undefined) {
+    throw invalid('run_test needs targetId or accountDescription');
+  }
   const files = args['testFiles'];
   if (!Array.isArray(files) || files.length === 0 || files.length > MAX_IPC_FILES) {
     throw invalid(`run_test needs testFiles as an array of one to ${MAX_IPC_FILES} strings`);
@@ -129,7 +148,8 @@ function parseRunTest(value: unknown): JobSubmission {
   const key = args['idempotencyKey'];
   if (key !== undefined && (typeof key !== 'string' || key === '')) throw invalid('run_test needs idempotencyKey as a non-empty string when given');
   return {
-    targetId,
+    ...(targetId === undefined ? {} : { targetId }),
+    ...(accountDescription === undefined ? {} : { accountDescription }),
     testFiles: files as string[],
     ...(key === undefined ? {} : { idempotencyKey: key }),
   };

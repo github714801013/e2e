@@ -64,7 +64,8 @@ export function createProject(files: Readonly<Record<string, string>>): FixtureP
   }
   return {
     dir,
-    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+    // A browser the run just closed can still hold the directory on Windows.
+    cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }),
   };
 }
 

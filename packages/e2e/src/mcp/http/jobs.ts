@@ -30,6 +30,7 @@ import {
   type IpcJobPhase,
   type IpcResult,
 } from '../../run/dynamic-ipc.ts';
+import type { AccountStore } from './accounts.ts';
 import { childEnvironment, JOB_RETENTION_MS, MAX_QUEUED_JOBS_PER_RUN, type HttpMcpToken } from './config.ts';
 import {
   listedArtifacts,
@@ -81,9 +82,11 @@ const TERMINAL: ReadonlySet<JobStatus> = new Set<JobStatus>([
 
 type FinishedStatus = 'passed' | 'failed' | 'timed_out' | 'interrupted' | 'infrastructure_error' | 'rejected';
 
-/** What a client asks to run. */
+/** What a client asks to run: one target, named directly or by an account description. */
 export interface JobSubmission {
-  readonly targetId: string;
+  readonly targetId?: string | undefined;
+  /** Business words that select exactly one enabled account; its name becomes the target. */
+  readonly accountDescription?: string | undefined;
   readonly testFiles: readonly string[];
   readonly idempotencyKey?: string | undefined;
 }
@@ -137,6 +140,8 @@ interface JobServiceOptions {
   readonly cwd: string;
   readonly configPath?: string | undefined;
   readonly env: NodeJS.ProcessEnv;
+  /** The pool `accountDescription` resolves against and whose passwords each run inherits. */
+  readonly accounts?: AccountStore | undefined;
   /** Workers one run may start; the project config's `workers` is capped by it. */
   readonly maxWorkers: number;
   /** Runs alive at once; a new RunKey is refused past it. */
@@ -228,7 +233,7 @@ export class JobService {
   /** Accepts one submission; a repeated idempotency key returns the original job. */
   async submit(token: HttpMcpToken, input: JobSubmission): Promise<JobStatusView> {
     if (this.closing) throw new ConfigurationError('INVALID_ARGUMENT', 'the gateway is shutting down');
-    const targetId = bounded(input.targetId, 200, 'targetId');
+    const targetId = await this.resolveTarget(input);
     if (!Array.isArray(input.testFiles) || input.testFiles.length === 0 || input.testFiles.length > MAX_IPC_FILES) {
       throw invalid(`testFiles must list 1 to ${MAX_IPC_FILES} project-relative files`);
     }
@@ -322,6 +327,34 @@ export class JobService {
       run.send({ v: 1, type: 'submit', jobId, files });
       return view(record);
     });
+  }
+
+  /**
+   * The target a submission names: `targetId`, or the one enabled account its
+   * description selects. Naming both is ambiguous, naming neither is refused.
+   */
+  private async resolveTarget(input: JobSubmission): Promise<string> {
+    // Naming both is the conflict, whatever either value holds: an empty
+    // description beside a target is still two selectors.
+    if (input.targetId !== undefined && input.accountDescription !== undefined) {
+      throw new ConfigurationError(
+        'ACCOUNT_SELECTION_CONFLICT',
+        'run_test takes targetId or accountDescription, not both',
+      );
+    }
+    const direct = input.targetId === undefined ? undefined : bounded(input.targetId, 200, 'targetId');
+    const description =
+      input.accountDescription === undefined ? undefined : bounded(input.accountDescription, 200, 'accountDescription');
+    if (description !== undefined) {
+      if (this.options.accounts === undefined) {
+        throw new ConfigurationError('INVALID_ARGUMENT', 'accountDescription needs an account pool on this gateway');
+      }
+      return (await this.options.accounts.resolve(description)).name;
+    }
+    if (direct === undefined) {
+      throw new ConfigurationError('INVALID_ARGUMENT', 'run_test needs targetId or accountDescription');
+    }
+    return direct;
   }
 
   /** One job's current status, for the principal that submitted it. */
@@ -758,7 +791,13 @@ export class JobService {
         maxWorkers: this.options.maxWorkers,
         startupTimeoutMs: this.startupTimeoutMs,
         runTimeoutMs: this.options.runTimeoutMs,
-        env: this.options.env,
+        // The runtime targets file and one password variable per enabled
+        // account; the child's config reads the former, the latter never
+        // reaches the file.
+        env:
+          this.options.accounts === undefined
+            ? this.options.env
+            : { ...this.options.env, ...(await this.options.accounts.childEnvironment()) },
         log: this.options.log,
         service: this,
       });

@@ -214,7 +214,7 @@ describe('collect', () => {
     }
   });
 
-  it('narrows collection to a literal prefix, tolerating a failing file outside it', async () => {
+  it('narrows collection to a literal prefix, or tolerates a failing file on request', async () => {
     const projectRoot = mkdtempSync(path.join(tmpdir(), 'e2e-prefix-'));
     try {
       for (const [file, source] of Object.entries({
@@ -237,6 +237,10 @@ describe('collect', () => {
       expect(absolute.uncollected.map((file) => file.file)).toEqual(['tests/broken/b.e2e.ts']);
       await expect(collect(config, [], undefined, 'tests/broken')).rejects.toThrow(/failed to collect tests\/broken\/b\.e2e\.ts/);
       await expect(collect(config, [], undefined, '')).rejects.toThrow(/failed to collect tests\/broken\/b\.e2e\.ts/);
+      // A listing keeps what it could read, so a caller that reports the rest still gets the list.
+      const tolerated = await collect(config, [], undefined, undefined, true);
+      expect(tolerated.files.map((file) => file.file)).toEqual(['tests/healthy/a.e2e.ts']);
+      expect(tolerated.uncollected.map((file) => file.file)).toEqual(['tests/broken/b.e2e.ts']);
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }

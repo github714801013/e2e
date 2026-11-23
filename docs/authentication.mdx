@@ -129,9 +129,9 @@ targets: [{
   [`SESSION_LOCK_TIMEOUT`](/reference/errors), though a test's own timeout
   normally fires first.
 - The state is keyed by the app (`app.identity`, else its origin), the app's
-  `environment`, and the account. The target's name and the run's ports are
-  not part of the key: renaming a target or moving to a new port keeps the
-  login. Different accounts keep one state each.
+  `environment`, the account, and the target's name. Moving to a new port
+  keeps the login; renaming a target signs it in once more. Different
+  accounts, and different targets on one app, keep one state each.
 - It lives in `.e2e/sessions/shared/` under the project root, encrypted with
   AES-256-GCM; the key sits beside it with owner-only permissions. It is not
   part of a run's [`output`](/reference/config#output), so clearing results

@@ -54,6 +54,10 @@ function collected(projectRoot: string) {
       { file: 'tests/login.e2e.ts', title: 'signs in', target: 'web', agent: 'default', tags: [] },
       { file: '../shared/out.e2e.ts', title: 'outside', target: 'web', agent: 'default', tags: [] },
     ],
+    targets: [
+      { name: 'web', url: 'https://example.test' },
+      { name: 'device' },
+    ],
   };
 }
 
@@ -281,6 +285,42 @@ describe('ScriptService list', () => {
     expect(listed.scripts.map((script) => script.path)).toEqual(['tests/healthy/a.e2e.ts']);
   });
 
+  it('reports a file the collection could not read instead of failing', async () => {
+    const dir = root();
+    writeFiles(dir, 'tests/healthy/a.e2e.ts', 'tests/broken/b.e2e.ts');
+    const result = {
+      projectRoot: dir,
+      pairs: [{ file: 'tests/healthy/a.e2e.ts', title: 'healthy', target: 'web', agent: 'default', tags: [] }],
+      targets: [
+        { name: 'web', url: 'https://example.test' },
+        { name: 'device' },
+      ],
+      uncollected: [
+        { file: 'tests/broken/b.e2e.ts', reason: 'Invalid Unicode escape sequence' },
+        { file: '../outside/b.e2e.ts', reason: 'outside the root' },
+      ],
+    };
+    const cli = fakeCli(
+      dir,
+      `if (!process.argv.includes('--allow-uncollected')) process.exitCode = 2;
+else console.log(${JSON.stringify(JSON.stringify(result))});`,
+    );
+    const scripts = await service(dir, cli);
+    const signal = new AbortController().signal;
+
+    const listed = await scripts.listScripts({}, signal);
+    expect(listed.scripts.map((script) => script.path)).toEqual(['tests/healthy/a.e2e.ts']);
+    // A path under the test root only, and no reason: a collection error can quote the source.
+    expect(listed.uncollected).toEqual(['tests/broken/b.e2e.ts']);
+    // Targets carry the app URL a caller picks one by, and nothing secret.
+    expect(listed.targets).toEqual([
+      { name: 'web', url: 'https://example.test' },
+      { name: 'device' },
+    ]);
+    // A prefix narrows the failures the same way it narrows the scripts.
+    expect((await scripts.listScripts({ prefix: 'tests/healthy' }, signal)).uncollected).toEqual([]);
+  });
+
   it('turns a failed, silent, or malformed collection into COLLECTION_ERROR', async () => {
     const dir = root();
     const signal = new AbortController().signal;
@@ -332,11 +372,15 @@ console.log(${JSON.stringify(JSON.stringify(collected(dir)))});
     mkdirSync(path.join(dir, 'tests'));
     writeFileSync(path.join(dir, 'tests', 'bad.e2e.ts'), 'old');
     // A candidate is the only call the collection child sees with a .tmp name;
-    // it fails the way a real import failure does.
+    // it fails the way a real import failure does. The candidate validation
+    // must never ask for --allow-uncollected: with it, this branch would
+    // succeed and the save would land.
     const cli = fakeCli(
       dir,
-      `if ((process.argv.at(-1) ?? '').includes('.tmp.e2e.ts')) { console.error('boom'); process.exitCode = 2; }
-else console.log(${JSON.stringify(JSON.stringify(collected(dir)))});`,
+      `if (process.argv.at(-1)?.includes('.tmp.e2e.ts') === true) {
+  if (process.argv.includes('--allow-uncollected')) console.log(${JSON.stringify(JSON.stringify({ projectRoot: dir, pairs: [] }))});
+  else { console.error('boom'); process.exitCode = 2; }
+} else console.log(${JSON.stringify(JSON.stringify(collected(dir)))});`,
     );
     const scripts = await service(dir, cli);
 

@@ -404,10 +404,12 @@ describe('e2e mcp', { timeout: 120_000 }, () => {
     expect(unknown.isError).toBe(true);
     expect(unknown.text).toContain('UNKNOWN_TARGET');
 
+    // A config file exists here, and an engine session opens without reading it.
     const named = await invoke('open_session', { engine: '@e2e-dev/web', app: { url: app.url } });
-    expect(named.isError).toBe(true);
-    expect(named.text).toContain('INVALID_ARGUMENT');
-    expect(named.text).toContain(`${path.join(project.dir, 'e2e.config.ts')} exists; leave engine out`);
+    expect(named.isError, named.text).toBe(false);
+    expect(named.text).toContain('button "Increment"');
+    const namedClosed = await invoke('close_session');
+    expect(namedClosed.isError, namedClosed.text).toBe(false);
 
     const absent = await invoke('open_session', { config: 'missing.config.ts' });
     expect(absent.isError).toBe(true);
@@ -573,7 +575,7 @@ describe('e2e mcp', { timeout: 120_000 }, () => {
 
       const opened = await open({ engine: '@e2e-dev/web', app: { url: app.url } });
       expect(opened.isError, opened.text).toBe(false);
-      expect(opened.text).toMatch(/^Session \S+ open on target "web" \(platform web, engine web [^)]+\), headless; no config file: one target on @e2e-dev\/web, every other setting at its default\./);
+      expect(opened.text).toMatch(/^Session \S+ open on target "web" \(platform web, engine web [^)]+\), headless; engine session: one target on @e2e-dev\/web, every other setting at its default; the project config is not read\./);
       expect(opened.text).toContain('button "Increment"');
     } finally {
       await other.close();

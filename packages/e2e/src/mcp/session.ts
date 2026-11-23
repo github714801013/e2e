@@ -80,9 +80,10 @@ export interface OpenSessionOptions {
   /** One test to run in the session before it is handed over, named as `e2e run` takes a positional (`tests/a.e2e.ts:12`). */
   readonly test?: string | undefined;
   /**
-   * The engine to open on where the project has no config file: a package
-   * whose default export is its factory (`@e2e-dev/web`), or that factory
-   * call as data (`FactoryRef`). Excludes `target`, `config`, and `test`.
+   * The engine to open the session on instead of the project's config: a
+   * package whose default export is its factory (`@e2e-dev/web`), or that
+   * factory call as data (`FactoryRef`). Excludes `target`, `config`, and
+   * `test`.
    */
   readonly engine?: string | FactoryRef | undefined;
   /** The app of an `engine` session. */
@@ -114,7 +115,7 @@ export interface SessionHostOptions {
    * loaded in `graph`, where the session's test files load too.
    */
   readonly loadConfig: (configPath: string, graph: string) => Promise<LoadedConfig>;
-  /** Builds the config of a session opened with `engine`; throws where the project has a config file. */
+  /** Builds the config of a session opened with `engine`, without reading the project's config file. */
   readonly loadEngineConfig: (session: EngineSession) => Promise<ResolvedConfig>;
   /** Holds what the process prints while `load` evaluates a config and registers its secrets; by default nothing is held. */
   readonly withholdOutput?: (<T>(load: () => Promise<T>) => Promise<T>) | undefined;
@@ -379,7 +380,7 @@ export class SessionHost {
         origin:
           'file' in source
             ? `config ${source.file}, read with the e2e mcp server's environment, not your shell's.`
-            : `no config file: one target on ${source.engine.package}, every other setting at its default. run_tests and open_session {test} need an e2e.config.ts (npx e2e init writes one).`,
+            : `engine session: one target on ${source.engine.package}, every other setting at its default; the project config is not read. run_tests and open_session {test} need a session on an e2e.config.ts.`,
         headed,
         attempt,
         step,
@@ -431,7 +432,7 @@ export class SessionHost {
     }
     const needsConfig = Object.entries({ config: options.config, target: options.target, test: options.test }).find(([, value]) => value !== undefined)?.[0];
     if (needsConfig !== undefined) {
-      throw new ConfigurationError('INVALID_ARGUMENT', `open_session: ${needsConfig} names part of a config file, and engine opens a session without one; pass one or the other`);
+      throw new ConfigurationError('INVALID_ARGUMENT', `open_session: ${needsConfig} names part of a config file, and engine opens a session that does not read one; pass one or the other`);
     }
     return { engine: { ...(typeof engine === 'string' ? { package: engine } : engine), ...(app === undefined ? {} : { app }) } };
   }
@@ -612,7 +613,7 @@ export class SessionHost {
           ])
           .optional()
           .describe(
-            'Only where the project has no config file: the engine to open a session on, as a config would build it. A package name calls its default export with no options: "@e2e-dev/web". An object passes options, and an option can be another factory call, which is how an engine gets a device or browser provider: {package: "@e2e-dev/mobile", options: {platform: "ios"}}, or {package: "@e2e-dev/mobile", options: {platform: "ios", device: {package: "@e2e-dev/limrun", export: "limrun", options: {region: "eu"}}}} for mobile({platform: "ios", device: limrun({region: "eu"})}). A package not installed fails with the command that installs it. Excludes target, config, and test',
+            'Open the session on this engine instead of the project config file, as a config would build it. A package name calls its default export with no options: "@e2e-dev/web". An object passes options, and an option can be another factory call, which is how an engine gets a device or browser provider: {package: "@e2e-dev/mobile", options: {platform: "ios"}}, or {package: "@e2e-dev/mobile", options: {platform: "ios", device: {package: "@e2e-dev/limrun", export: "limrun", options: {region: "eu"}}}} for mobile({platform: "ios", device: limrun({region: "eu"})}). A package not installed fails with the command that installs it. Excludes target, config, and test',
           ),
         app: z
           .object({

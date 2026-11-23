@@ -460,7 +460,7 @@ export function collectInMemory(
  */
 export async function collectSetups(config: ResolvedConfig): Promise<Collection> {
   const discovered = discoverFiles(config.projectRoot, config.tests);
-  const { files, uncollected } = await collectFiles(config, discovered, () => false, true, new Map(), undefined);
+  const { files, uncollected } = await collectFiles(config, discovered, () => false, true, false, new Map(), undefined);
   return { files, tests: files.flatMap((entry) => entry.tests), nearMisses: [], unmatchedPositionals: [], uncollected };
 }
 
@@ -499,13 +499,16 @@ function collectionPrefix(projectRoot: string, prefix: string): string {
  * unnarrowed run, fails the run; one in a file positionals left out is kept
  * in `uncollected`, so a half-written file elsewhere in the suite does not
  * stop `e2e run tests/one.e2e.ts`. `prefix` narrows the same way for a caller
- * naming a literal path prefix, such as `e2e list --prefix`.
+ * naming a literal path prefix, such as `e2e list --prefix`. `allowUncollected`
+ * keeps a selected file's failure in `uncollected` too, for a caller that
+ * lists rather than runs.
  */
 export async function collect(
   config: ResolvedConfig,
   positionals: readonly string[] = [],
   graph?: string,
   prefix?: string,
+  allowUncollected = false,
 ): Promise<Collection> {
   const discovered = discoverFiles(config.projectRoot, config.tests);
   const { files: positionalFiles, unmatched, lines } = selectPositionals(config.projectRoot, discovered, positionals);
@@ -517,8 +520,9 @@ export async function collect(
     discovered,
     (file) => selected.has(file),
     // An empty prefix selects every discovered file, so a failure in any of
-    // them still fails the list.
+    // them still fails the list unless the caller allows it.
     positionals.length > 0 || (narrowedTo !== undefined && narrowedTo !== ''),
+    allowUncollected,
     lines,
     graph,
   );
@@ -541,13 +545,15 @@ function isCollectionError(cause: unknown): cause is Error {
  * project files it imports evaluated afresh in `graph` when one is named,
  * shared by every file of the run. A collection error in a selected file,
  * or in any file of a run nothing narrowed, throws; one in a file a
- * narrowed run left unselected is kept in `uncollected`.
+ * narrowed run left unselected, or in any file when `allowUncollected` is
+ * set, is kept in `uncollected`.
  */
 async function collectFiles(
   config: ResolvedConfig,
   discovered: readonly string[],
   isSelected: (file: string) => boolean,
   narrowed: boolean,
+  allowUncollected: boolean,
   lines: ReadonlyMap<string, readonly number[]>,
   graph: string | undefined,
 ): Promise<{ files: CollectedFile[]; uncollected: UncollectedFile[] }> {
@@ -556,7 +562,7 @@ async function collectFiles(
   const { redact } = staticSecretLedger(config.allSecrets);
   for (const file of discovered) {
     const absolutePath = path.join(config.projectRoot, file);
-    const skippable = narrowed && !isSelected(file);
+    const skippable = allowUncollected || (narrowed && !isSelected(file));
     let registration: ModuleRegistration;
     try {
       registration = await collectModule(() => importModule(absolutePath, 'collect', graph), absolutePath, redact);

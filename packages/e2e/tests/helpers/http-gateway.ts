@@ -27,20 +27,26 @@ export async function startGateway(
   app: FixtureApp,
   tokens: unknown,
   extraArgs: readonly string[] = [],
-  extraEnv: Record<string, string> = {},
+  extraEnv: Record<string, string | undefined> = {},
 ): Promise<Gateway> {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    APP_URL: app.url,
+    CI: '',
+    ...(tokens === undefined ? {} : { E2E_HTTP_MCP_TOKENS: JSON.stringify(tokens) }),
+  };
+  // An undefined override removes the variable, so a test can run the gateway
+  // without a credential the caller's shell happens to set.
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
   const child = spawn(
     process.execPath,
     [CLI, 'mcp', '--http', '--port', '0', '--config', 'e2e.config.ts', ...extraArgs],
     {
       cwd: project.dir,
-      env: {
-        ...(process.env as Record<string, string>),
-        APP_URL: app.url,
-        CI: '',
-        ...(tokens === undefined ? {} : { E2E_HTTP_MCP_TOKENS: JSON.stringify(tokens) }),
-        ...extraEnv,
-      },
+      env,
       stdio: 'pipe',
     },
   );

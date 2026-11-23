@@ -99,6 +99,12 @@ export interface HttpMcpOptions {
   readonly cwd: string;
   readonly configPath?: string | undefined;
   readonly target?: string | undefined;
+  /** The account pool directory: `accounts.json`, `secrets.env`, and the generated runtime targets. */
+  readonly accountsDir: string;
+  /** The read-only targets file the account pool layers on. */
+  readonly baseTargetsFile: string;
+  /** The admin credential; undefined disables the admin routes. */
+  readonly adminToken?: string | undefined;
   readonly headed: boolean;
   readonly version: string;
   readonly env: NodeJS.ProcessEnv;
@@ -292,12 +298,15 @@ export function httpPath(value: string | undefined): string {
   return normalized;
 }
 
+/** Credentials the gateway holds that no child process may inherit. */
+const GATEWAY_ONLY_ENV: ReadonlySet<string> = new Set(['E2E_HTTP_MCP_TOKENS', 'E2E_HTTP_MCP_ADMIN_TOKEN']);
+
 /** A child environment with the gateway's own credentials removed, every spelling on Windows. */
 export function childEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
   return Object.fromEntries(
     Object.entries(env).filter(
       (entry): entry is [string, string] =>
-        entry[1] !== undefined && entry[0].toUpperCase() !== 'E2E_HTTP_MCP_TOKENS',
+        entry[1] !== undefined && !GATEWAY_ONLY_ENV.has(entry[0].toUpperCase()),
     ),
   );
 }

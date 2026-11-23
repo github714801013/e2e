@@ -311,7 +311,7 @@ describe('SessionHost', { timeout: 60_000 }, () => {
     const asked: EngineSession[] = [];
     const bare = host(engines().next, { maxSessions: 3, onEngineSession: (session) => asked.push(session) });
     const { text } = await bare.open({ engine: { package: '@acme/kiosk', options: { lane: 2 } }, app: FAKE_APP });
-    expect(text).toContain('), headless; no config file: one target on @acme/kiosk, every other setting at its default.');
+    expect(text).toContain('), headless; engine session: one target on @acme/kiosk, every other setting at its default; the project config is not read.');
     expect(text).toContain(`App: ${FAKE_APP.url}/`);
     expect(asked).toEqual([{ package: '@acme/kiosk', options: { lane: 2 }, app: FAKE_APP }]);
     // Engine sessions hold no secrets, so a second one opens beside the first; a config's session does not.

@@ -13,6 +13,7 @@ import path from 'node:path';
 import type { Tool } from '@modelcontextprotocol/server';
 import { ConfigurationError, errorMessage, InfrastructureError, isE2EError } from '../../internal/errors.ts';
 import { textResult, type McpToolResult } from '../tools.ts';
+import type { AccountStore } from './accounts.ts';
 import { childEnvironment, type ScriptMcpTool } from './config.ts';
 
 /** Only test files the runner collects are addressable. */
@@ -45,11 +46,25 @@ interface ListedScript {
   readonly tests: readonly ListedScriptTest[];
 }
 
+/** A configured target and the app address a caller picks it by. */
+interface ListedTargetApp {
+  readonly name: string;
+  readonly url?: string;
+  /** Present only for an account pool entry; a base target has no business description. */
+  readonly description?: string;
+  /** Present only for an account pool entry; a disabled one is visible but not selectable. */
+  readonly enabled?: boolean;
+}
+
 interface ListScriptsResult {
   readonly scripts: readonly ListedScript[];
   /** Matches before `limit`; larger than `scripts.length` when truncated. */
   readonly total: number;
   readonly truncated: boolean;
+  /** Files the collection could not read, as paths under the test root. */
+  readonly uncollected: readonly string[];
+  /** Every configured target with its app URL, for picking one by page address; no credentials. */
+  readonly targets: readonly ListedTargetApp[];
 }
 
 interface GetScriptResult {
@@ -69,20 +84,22 @@ interface ScriptServiceOptions {
   readonly configPath?: string | undefined;
   readonly cliEntry: string;
   readonly env: NodeJS.ProcessEnv;
+  /** The account pool whose entries are merged into the target list. */
+  readonly accounts?: AccountStore | undefined;
   readonly log: (line: string) => void;
 }
 
 const LIST_SCHEMA: Tool = {
   name: 'list_test_scripts',
   description:
-    'List the test files in the configured test root that a run would collect, with the tests each declares. Runs collection in a child process; with prefix, only a test file under it that fails at import fails the call, while an unrelated file that fails is left out.',
+    'List the test files in the configured test root that a run would collect, with the tests each declares. Runs collection in a child process; a file whose collection fails is left out and named under uncollected instead of failing the call. The result also lists every configured target with its app URL, plus every account pool entry with its description and enabled flag, so a caller can pick a target by page address or an account by what it is for; credentials never appear in it.',
   inputSchema: {
     type: 'object',
     properties: {
       prefix: {
         type: 'string',
         maxLength: MAX_TEXT_ARG_CHARS,
-        description: 'Only files whose path under the test root starts with this literal prefix; collection narrows to them, so an unrelated file that fails to import does not fail the call.',
+        description: 'Only files whose path under the test root starts with this literal prefix; collection narrows to them.',
       },
       keyword: { type: 'string', maxLength: MAX_TEXT_ARG_CHARS, description: 'Only files whose path or a test title contains this, case-insensitive.' },
       limit: {
@@ -145,6 +162,9 @@ interface CollectedPair {
 interface CollectedSelection {
   readonly projectRoot: string;
   readonly pairs: readonly CollectedPair[];
+  /** Project-relative files collection failed to read. */
+  readonly uncollected: readonly string[];
+  readonly targets: readonly ListedTargetApp[];
 }
 
 interface ResolvedScript {
@@ -211,7 +231,7 @@ export class ScriptService {
         ? prefix
         : path.resolve(this.root, prefix) + (prefix.endsWith('/') ? path.sep : '');
     // The lock keeps a save's candidate out of the collected tree.
-    const { projectRoot, pairs } = await this.withCollectionLock(() => this.collect(signal, collectionPrefix));
+    const { projectRoot, pairs, uncollected: failedFiles, targets } = await this.withCollectionLock(() => this.collect(signal, collectionPrefix));
     const keyword = input.keyword?.toLowerCase();
     // One filesystem check per file, not per test.
     const paths = new Map<string, Promise<string | undefined>>();
@@ -236,8 +256,42 @@ export class ScriptService {
     const scripts = [...byFile.entries()]
       .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([file, tests]) => ({ path: file, tests }));
+    const uncollected: string[] = [];
+    for (const file of failedFiles) {
+      const relative = await listed(file);
+      if (relative === undefined) continue;
+      if (prefix !== undefined && !relative.startsWith(prefix)) continue;
+      uncollected.push(relative);
+    }
     const limit = input.limit ?? DEFAULT_LIST_LIMIT;
-    return { scripts: scripts.slice(0, limit), total: scripts.length, truncated: scripts.length > limit };
+    return {
+      scripts: scripts.slice(0, limit),
+      total: scripts.length,
+      truncated: scripts.length > limit,
+      uncollected,
+      targets: await this.mergedTargets(targets),
+    };
+  }
+
+  /**
+   * The collected targets followed by the account pool's. A project whose
+   * config reads `E2E_TARGETS_FILE` reports the pool entries among its
+   * collected targets too; they are replaced by the pool's own view so a
+   * description is never lost. The pool is read on every call, so an admin
+   * change applies to the next list without a restart.
+   */
+  private async mergedTargets(base: readonly ListedTargetApp[]): Promise<readonly ListedTargetApp[]> {
+    if (this.options.accounts === undefined) return base;
+    const pool = await this.options.accounts.list();
+    const accountNames = new Set(pool.map((account) => account.name));
+    const declared = base.filter((target) => !accountNames.has(target.name));
+    const accounts = pool.map((account): ListedTargetApp => ({
+      name: account.name,
+      url: account.url,
+      description: account.description,
+      enabled: account.enabled,
+    }));
+    return [...declared, ...accounts];
   }
 
   /**
@@ -411,18 +465,23 @@ export class ScriptService {
     }
   }
 
-  /** The collection command; a positional narrows it to one file, a prefix to the files it names. */
-  private collectArgs(positional?: string, prefix?: string): string[] {
+  /**
+   * The collection command; a positional narrows it to one file, a prefix to
+   * the files it names. A candidate validation never allows an uncollected
+   * file, since the save must be refused.
+   */
+  private collectArgs(positional?: string, prefix?: string, allowUncollected = false): string[] {
     const args = [this.options.cliEntry, 'list', '--reporter', 'json', '--pass-with-no-tests'];
     if (this.options.configPath !== undefined) args.push('--config', this.options.configPath);
     if (prefix !== undefined) args.push('--prefix', prefix);
+    if (allowUncollected) args.push('--allow-uncollected');
     if (positional !== undefined) args.push(positional);
     return args;
   }
 
   /** Collects through the built CLI, bounded in time and output. */
   private async collect(signal: AbortSignal, prefix?: string): Promise<CollectedSelection> {
-    const outcome = await this.collectChild(this.collectArgs(undefined, prefix), signal);
+    const outcome = await this.collectChild(this.collectArgs(undefined, prefix, true), signal);
     if (signal.aborted) throw new InfrastructureError('CANCELLED', 'list_test_scripts was cancelled');
     if (outcome.timedOut) throw new ConfigurationError('COLLECTION_ERROR', `list_test_scripts: collection did not finish within ${COLLECT_TIMEOUT_MS} ms`);
     if (outcome.overflow) throw new ConfigurationError('COLLECTION_ERROR', `list_test_scripts: collection output exceeded ${COLLECT_STDOUT_BYTES} bytes`);
@@ -437,7 +496,7 @@ export class ScriptService {
     } catch {
       throw new ConfigurationError('COLLECTION_ERROR', 'list_test_scripts: collection printed no valid JSON');
     }
-    const result = parsed as { projectRoot?: unknown; pairs?: unknown } | null;
+    const result = parsed as { projectRoot?: unknown; pairs?: unknown; targets?: unknown; uncollected?: unknown } | null;
     const projectRoot = result?.projectRoot;
     if (typeof projectRoot !== 'string' || projectRoot === '') {
       throw new ConfigurationError('COLLECTION_ERROR', 'list_test_scripts: collection result has no project root');
@@ -460,6 +519,23 @@ export class ScriptService {
           },
         ];
       }),
+      // The reason stays out of the tool result: collection errors can quote
+      // the failed source, and the path is what a caller acts on.
+      uncollected: Array.isArray(result?.uncollected)
+        ? result.uncollected.flatMap((entry): string[] => {
+            if (typeof entry !== 'object' || entry === null) return [];
+            const { file } = entry as Record<string, unknown>;
+            return typeof file === 'string' ? [file] : [];
+          })
+        : [],
+      targets: Array.isArray(result?.targets)
+        ? result.targets.flatMap((entry): ListedTargetApp[] => {
+            if (typeof entry !== 'object' || entry === null) return [];
+            const { name, url } = entry as Record<string, unknown>;
+            if (typeof name !== 'string') return [];
+            return [typeof url === 'string' ? { name, url } : { name }];
+          })
+        : [],
     };
   }
 
@@ -470,11 +546,15 @@ export class ScriptService {
    * inherited stdio pipes open, which would pin the session's in-flight count
    * forever.
    */
-  private collectChild(args: readonly string[], signal: AbortSignal | undefined): Promise<CollectOutcome> {
+  private async collectChild(args: readonly string[], signal: AbortSignal | undefined): Promise<CollectOutcome> {
+    // A project whose config declares its targets from `E2E_TARGETS_FILE` needs
+    // the pool's generated view here too, or collection sees no targets at all.
+    const pool = await this.options.accounts?.childEnvironment();
+    const env = pool === undefined ? childEnvironment(this.options.env) : { ...childEnvironment(this.options.env), ...pool };
     return new Promise<CollectOutcome>((resolve, reject) => {
       const child = spawn(process.execPath, [...args], {
         cwd: this.root,
-        env: childEnvironment(this.options.env),
+        env,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });

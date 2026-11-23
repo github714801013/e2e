@@ -976,13 +976,14 @@ bunx e2e list --changed-since origin/main
 | --- | --- |
 | `[files...]` | As for [`run`](#positional-arguments). |
 | `--prefix <prefix>` | Only files under this literal path prefix, relative to the project root or absolute inside it. A test file outside the prefix that fails to collect no longer fails the list; one under it still does. |
+| `--allow-uncollected` | A file that fails to collect is reported under `uncollected` in `--reporter json` instead of failing the list. |
 | `--config`, `--target`, `--tag`, `--tag-mode`, `--exclude-tag`, `--grep`, `--grep-invert`, `--changed-since`, `--last-failed`, `--shard`, `--pass-with-no-tests` | As for [`run`](#flags). `--last-failed` reads `report.json` under the config's [`output`](/reference/config#output). The configured [test filters](/filters) run as for `run`, and their lines go to stderr. |
 | `--reporter <id>` | `list` or `json`. Default: `list`. |
 
 | Reporter | Writes |
 | --- | --- |
 | `list` | One line per pair in selection order: `file › title [target]`, with the describe path joined by ` › ` (`tests/billing.e2e.ts › checkout › pays [web]`), then each declared tag as `#tag` (`tests/billing.e2e.ts › checkout › pays [web] #smoke #billing`). A skipped test keeps its line, with `(skipped: <reason>)` appended, and a test that a test filter left out ends with `(left out by <filter>: <reason>)`. Setup tests are listed like any other. |
-| `json` | `{ "projectRoot": "<absolute dir>", "pairs": [...] }` to stdout. Every `file` is relative to `projectRoot`. Each pair carries `id`, `file`, `title`, `titlePath`, `kind` (`test` or `setup`), `tags` (the tags the test declares, `[]` when none), `source` when the declaration is known, `session` when the test consumes one, `sessions`, `serialId` when the test is in a serial group, `target`, `agent`, `disposition` (`run`, `skip`, or `filtered` when a test filter left it out), `reason` when skipped or left out, and `filter`, the test filter's name, when one left it out. |
+| `json` | `{ "projectRoot": "<absolute dir>", "pairs": [...], "targets": [...], "uncollected": [...] }` to stdout. Every `file` is relative to `projectRoot`. Each pair carries `id`, `file`, `title`, `titlePath`, `kind` (`test` or `setup`), `tags` (the tags the test declares, `[]` when none), `source` when the declaration is known, `session` when the test consumes one, `sessions`, `serialId` when the test is in a serial group, `target`, `agent`, `disposition` (`run`, `skip`, or `filtered` when a test filter left it out), `reason` when skipped or left out, and `filter`, the test filter's name, when one left it out. `targets` lists each selected target as `{ "name", "url" }`, with `url` omitted for a target without an app address; credentials never appear. `uncollected` lists every discovered file collection could not read, each `{ "file", "reason" }`, whatever `--prefix` selected; without `--allow-uncollected`, a failure under the prefix still fails the call. |
 
 Pairs a selection flag removed are not listed. [`list` from `e2e/runner`](/reference/runner)
 runs the same selection in process and also returns the removed pairs.

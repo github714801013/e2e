@@ -107,6 +107,7 @@ import {
   list,
   type ListedPair,
   type ListOptions,
+  type ListResult,
   openHost,
   run,
   runDynamic,
@@ -958,6 +959,11 @@ void list({
   output: 'out', env: {}, targets: ['web'], changedSince: 'origin/main',
 } satisfies ListOptions);
 void list({ config: { targets } });
+// A listing can report a file it could not collect instead of failing.
+void list({ prefix: 'tests/oa-m', allowUncollected: true });
+declare const listResult: ListResult;
+listResult.uncollected satisfies readonly { file: string; reason: string }[];
+listResult.targetApps satisfies readonly { name: string; url?: string }[];
 void isE2EError(new ConfigurationError('NO_TESTS', 'none'));
 // @ts-expect-error grep is an array of RegExp, not strings
 void list({ grep: ['plain'] });

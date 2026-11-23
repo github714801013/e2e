@@ -3,7 +3,6 @@
 import path from 'node:path';
 import { discoverConfig, loadConfigModule, missingConfigError } from '../config/load.ts';
 import { resolveConfig, type ResolvedConfig } from '../config/resolve.ts';
-import { ConfigurationError } from '../internal/errors.ts';
 import type { TargetApp } from '../types.ts';
 import { loadEngine, type EngineLookup, type FactoryRef } from './default-engine.ts';
 
@@ -28,7 +27,7 @@ export function locateProjectConfig(options: ProjectOptions): string {
   return configPath;
 }
 
-/** What `open_session` names to open a session where the project has no config file: the engine's factory call, and the app. */
+/** What `open_session` names to open a session instead of the project's config: the engine's factory call, and the app. */
 export interface EngineSession extends FactoryRef {
   /** The target's app: the URL it opens, or the installed app or build a device launches. */
   readonly app?: Pick<TargetApp, 'url' | 'bundleId' | 'appPath'> | undefined;
@@ -37,20 +36,13 @@ export interface EngineSession extends FactoryRef {
 /**
  * The config of a session opened with `engine`: one target on that engine
  * package, with the app the call names and every other setting at its
- * default. The project root is `cwd`. Refused where a config file exists,
- * since that file is what a session on the project loads.
+ * default. The project root is `cwd`. A config file the project has is not
+ * read, so the session has no credentials, secrets, or project tools.
  */
 export async function loadEngineConfig(
   options: ProjectOptions & { readonly env: NodeJS.ProcessEnv } & Pick<EngineLookup, 'enginesDir'>,
   session: EngineSession,
 ): Promise<ResolvedConfig> {
-  const { configPath } = discoverConfig(options.cwd, options.configPath);
-  if (configPath !== undefined) {
-    throw new ConfigurationError(
-      'INVALID_ARGUMENT',
-      `open_session: engine opens a session where there is no config file, and ${configPath} exists; leave engine out to open one of its targets`,
-    );
-  }
   const engine = await loadEngine(session, { cwd: options.cwd, enginesDir: options.enginesDir });
   return resolveConfig(
     { targets: [{ engine, ...(session.app === undefined ? {} : { app: session.app }) }] },

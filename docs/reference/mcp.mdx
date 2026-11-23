@@ -156,7 +156,7 @@ open_session {target: "web", headed: true}
 | `config` | string (path) | no | The config for this session, absolute or relative to the server's working directory (`cwd` in the client's MCP config). Otherwise `--config`, else discovered like `e2e run`. |
 | `headed` | boolean | no | `true` shows this session's browser or simulator, `false` hides it. Without it the session follows `--headed`. |
 | `test` | string | no | One test to run first, named like an `e2e run` positional. The session stops where the test stopped. See [Running a test](#running-a-test). |
-| `engine` | string or object | no | The session's engine in a directory with no config file, as a package name or `{package, export, options}`. See [Without a config](#without-a-config). |
+| `engine` | string or object | no | The session's engine, instead of the project's config, as a package name or `{package, export, options}`. See [Without a config](#without-a-config). |
 | `app` | object | no | The app under test for an `engine` session, as `url`, `bundleId`, or `appPath`. |
 
 #### `tools`
@@ -580,6 +580,8 @@ Start the server in the project directory. Config discovery works like
 In a directory with no config file, `open_session` needs an `engine`. The
 session has one target on that engine. Every other setting is at its
 default, so the session has no credentials, secrets, or project tools.
+Passing `engine` where a config file exists opens the same kind of session:
+the file is not read.
 
 ```txt
 open_session {engine: "@e2e-dev/web", app: {url: "http://localhost:3000"}}
@@ -637,7 +639,7 @@ options, or to name an export, write `engine` as an object:
 | --- | --- |
 | `CONFIG_NOT_FOUND` | `open_session` without `engine`, and the directory has no config. |
 | `ENGINE_NOT_INSTALLED` | A package that `engine` names is in none of the three lookup places. |
-| `INVALID_ARGUMENT` | `package` is not a package name, `export` is not an export name, `engine` comes with `target`, `config`, or `test`, or the directory has a config. Also `app` without `engine`. |
+| `INVALID_ARGUMENT` | `package` is not a package name, `export` is not an export name, or `engine` comes with `target`, `config`, or `test`. Also `app` without `engine`. |
 | `INVALID_CONFIG` | The named export is not a function, a factory refused its `options`, the engine's factory returned no engine, or the engine refused `app`. For an export that is not a function, the message lists the package's functions. |
 
 ## Output
@@ -835,6 +837,62 @@ missing or unknown token is `401`, and it creates no session. Tokens are read
 once at startup. They are not passed to the per-session child, which runs
 project code.
 
+### Account pool
+
+`--http` can layer an account pool over the project's targets. An account is
+one target plus a description; a client picks it by description instead of
+naming a target, and every client shares it.
+
+| Variable | Does |
+| --- | --- |
+| `E2E_HTTP_MCP_ACCOUNTS_DIR` | The pool's directory, `.e2e/accounts` by default. A missing directory is an empty pool. |
+| `E2E_TARGETS_BASE_FILE` | The read-only targets the generated runtime file keeps ahead of the accounts, `.e2e/targets.json` by default. |
+| `E2E_HTTP_MCP_ADMIN_TOKEN` | The credential for the admin page and API, at least 32 characters and no whitespace. Unset serves neither: both paths answer `404`. It is never passed to a child process. |
+
+The pool stores `accounts.json` (name, description, url, username,
+`passwordRef`, enabled, timestamps) and `secrets.env`
+(`E2E_ACCOUNT_<NAME>_PASSWORD=<JSON string>`, mode `0600`). A password is at
+least 6 characters (code points), the floor a configured credential has.
+Before a run or
+session child starts, the gateway writes `runtime-targets.json` with the base
+targets followed by every enabled account and sets `E2E_TARGETS_FILE` for that
+child. An account's password appears in the file as the placeholder
+`{{E2E_ACCOUNT_<NAME>_PASSWORD}}`; its value travels only in the child's
+environment, so no file, response, or log carries it. A project that reads
+`E2E_TARGETS_FILE` and resolves those placeholders runs on the pool, for a
+session child as well as a run child. An enabled account needs the base targets
+file (`ACCOUNT_STORE_INVALID` when it is missing); a gateway with no accounts
+and no base file injects neither, and admin writes keep working without it.
+Writes are atomic and serialized inside the gateway, and the next call sees
+them.
+
+`open_session` and `run_test` accept `accountDescription` in place of `target`
+and `targetId`. Every word of the description must appear in an account's
+description, case-insensitively; whitespace and punctuation split the query
+into words and are ignored inside the stored description, so `无权限PC`
+matches `无权限 PC`. Exactly one enabled account must match; otherwise the call fails
+with `ACCOUNT_NOT_FOUND`, `ACCOUNT_AMBIGUOUS`, or `ACCOUNT_DISABLED`, the last
+two naming the candidates. Passing a description beside a target is
+`ACCOUNT_SELECTION_CONFLICT`. A name is not a description.
+
+The admin API answers `GET` and `POST /admin/api/accounts` and `PATCH` and
+`DELETE /admin/api/accounts/<name>`, each with
+`Authorization: Bearer <E2E_HTTP_MCP_ADMIN_TOKEN>`. `POST` takes `name`,
+`description`, `url`, `username`, and `password`; `PATCH` takes any of
+`description`, `enabled`, and `password`. Failures are `ACCOUNT_INVALID` (400),
+`ACCOUNT_DUPLICATE` (400), `ACCOUNT_NOT_FOUND` (404), and
+`ADMIN_UNAUTHORIZED` (401); an unsupported method answers `405` with
+`METHOD_NOT_ALLOWED`, and an unexpected failure `500` with `INTERNAL_ERROR`.
+`/admin?token=...` serves a page that adds accounts and edits their
+description, enabled state, password, and existence; the page moves the token
+to `sessionStorage` and drops it from the address bar, so anyone who may read
+the gateway logs should not learn a URL that carries it.
+
+Each account keeps its own shared login: the saved state's key includes the
+target name, so two accounts on one app never restore each other's session. A
+project upgrading from a runner that keyed shared logins without the target
+name signs each target in once more.
+
 ### Script tools
 
 Three tools let an HTTP client work on the project's test files. A token may
@@ -842,7 +900,7 @@ call them only when its `tools` lists them.
 
 | Tool | Does |
 | --- | --- |
-| `list_test_scripts` | Collects the project's tests and groups them by file, with paths relative to `--test-root`. Arguments: `prefix`, `keyword`, `limit`; `prefix` narrows collection, so an unrelated file that fails to import does not fail the call. |
+| `list_test_scripts` | Collects the project's tests and groups them by file, with paths relative to `--test-root`. Arguments: `prefix`, `keyword`, `limit`; a file whose collection fails is named under `uncollected` instead of failing the call, and `prefix` narrows both lists. The result also carries `targets`, every configured target and every pooled account as `{ name, url, description?, enabled? }` (`url` omitted without an app address), for picking a target by page address or an account by description; credentials never appear, and a disabled account stays listed with `enabled: false`. |
 | `get_test_script` | Returns one file's `path` and `content`. |
 | `save_test_script` | Writes one file atomically. Arguments: `path`, `content`, `overwrite`. |
 
@@ -858,22 +916,29 @@ directories under the root; a read whose parent is missing is
 
 - `list_test_scripts` collects through a child process, because collection
   executes each test file's top-level code. The child has a 30-second deadline
-  and its output is drained but never returned. A failing import in a selected
-  file or another collection error is `COLLECTION_ERROR`, naming the exit
-  status only: the child's stderr belongs to project code, and a test or
-  config that prints a secret would put it in the tool result. Run collection
-  locally for the error text. With `prefix`, collection narrows to the files
-  whose path under `--test-root` starts with it, so an unrelated test file that
-  fails at import is left uncollected and does not fail the call; one under
-  the prefix still does. Without it, the collection covers the whole project,
-  as a run does. Only files under `--test-root` are listed.
+  and its output is drained but never returned. A test file whose collection
+  fails is left out of `scripts` and named under `uncollected`, as a path
+  under `--test-root`, so one broken file does not make the list unavailable;
+  the error text stays out because the child's stderr belongs to project
+  code, and a test or config that prints a secret would put it in the tool
+  result. A failure outside one file's collection, such as a bad config, a
+  timeout, or too much output, is `COLLECTION_ERROR`, with the gateway naming
+  the exit status or the limit it hit and never quoting the child's output.
+  With `prefix`, collection narrows to the files whose path under
+  `--test-root` starts with it, and `uncollected` narrows the same way;
+  without it, the collection covers the whole project, as a run does. Only
+  files under `--test-root` are listed. The result also lists every
+  configured target and pooled account as `{ name, url, description?, enabled? }`,
+  so a caller can pick the target a page address belongs to, or the account a
+  description names, without keeping a list elsewhere; a target without an app
+  address has no `url`, and credentials are never part of it.
 - `save_test_script` writes at most 256 KiB through a temporary file in the
   same directory and a rename, so a reader sees the old file or the new one,
   never half of one. Before the rename it runs a collection with the
   candidate selected, so a save takes as long as a listing; content that does
   not collect is `COLLECTION_ERROR` naming the file, and the existing file
-  stays: one save that cannot import would otherwise fail every later
-  `list_test_scripts` for the whole project. A candidate a killed server left
+  stays: one save that cannot import would otherwise fail every later run of
+  the project. A candidate a killed server left
   behind is removed at startup. It refuses an existing file unless `overwrite`
   is true (`SCRIPT_EXISTS`).
 - Saves and collections take turns: a save waits for a running collection,
@@ -889,7 +954,7 @@ keep working. A token may call them only when its `tools` lists them.
 
 | Tool | Does |
 | --- | --- |
-| `run_test` | Queues one to fifty project-relative test files on one target and returns the job at once. Arguments: `targetId`, `testFiles`, `idempotencyKey`. |
+| `run_test` | Queues one to fifty project-relative test files on one target and returns the job at once. Arguments: `targetId` or `accountDescription` (exactly one), `testFiles`, `idempotencyKey`. |
 | `get_test_status` | One job's `status`, `counts`, timestamps, and `error`. Argument: `jobId`. |
 | `get_test_report` | The status plus per-test `results`: title, project-relative file, status, duration, attempts, bounded failure evidence, and artifact kinds. Argument: `jobId`. A result never carries an absolute path, though an `error.message` may quote one the Runner reported. |
 | `list_test_artifacts` | The artifacts a finished job kept, each with its kind, media type, redaction, size, and an authenticated `downloadUrl` for a local file (or the provider `url` for a hosted video). Argument: `jobId`. While `ready` is false the run has not ended yet; poll again. |

@@ -36,10 +36,10 @@ export function normalizeBaseUrl(raw: string): NormalizedBaseUrl {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new ConfigurationError('INVALID_APP_URL', `app URL must be http(s): ${raw}`);
   }
-  if (url.protocol === 'http:' && !isLoopbackHost(url.hostname)) {
+  if (url.protocol === 'http:' && !isLoopbackHost(url.hostname) && !isPrivateNetworkHost(url.hostname)) {
     throw new ConfigurationError(
       'INVALID_APP_URL',
-      `plain HTTP is allowed only for loopback hosts: ${raw}`,
+      `plain HTTP is allowed only for loopback and private network hosts: ${raw}`,
     );
   }
   if (url.port === '0' && !isLoopbackAddress(url.hostname)) {
@@ -114,6 +114,21 @@ export function isLoopbackHost(hostname: string): boolean {
   if (hostname === '::1' || hostname === '[::1]') return true;
   if (/^127(\.\d{1,3}){3}$/.test(hostname)) return true;
   return false;
+}
+
+/**
+ * True for a private network address: RFC 1918 IPv4 or an IPv6 unique local
+ * address. Plain HTTP is accepted there because internal test targets are
+ * commonly served over it; the public internet still requires HTTPS.
+ */
+function isPrivateNetworkHost(hostname: string): boolean {
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname);
+  if (octets !== null) {
+    const first = Number(octets[1]);
+    const second = Number(octets[2]);
+    return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
+  }
+  return /^\[f[cd][0-9a-f]{2}:/i.test(hostname);
 }
 
 /** True when environment may default to `test` (loopback, .localhost, .test hosts). */

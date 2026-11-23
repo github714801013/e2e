@@ -77,17 +77,24 @@ CI=1 npx e2e run            # the CI defaults, locally
 
 `list` takes the same files and selection flags (`--config`, `--target`,
 `--tag`, `--tag-mode`, `--exclude-tag`, `--grep`, `--grep-invert`,
-`--changed-since`, `--last-failed`, `--shard`, `--pass-with-no-tests`),
+`--changed-since`, `--last-failed`, `--shard`, `--pass-with-no-tests`,
+`--allow-uncollected`),
 prints one line per test-target pair, `file › title [target] #tag`, skipped
 pairs ending in ` (skipped: <reason>)`, and starts no app, engine, or
 worker. With `--changed-since`, the configured filters run as for `run`; a
 pair one left out ends in ` (left out by <filter>: <reason>)`. `--reporter json` prints
-`{ "projectRoot": "<absolute dir>", "pairs": [...] }`, naming a skip or left-out reason `reason` and the
+`{ "projectRoot": "<absolute dir>", "pairs": [...], "targets": [...], "uncollected": [...] }`, naming a skip or left-out reason `reason` and the
 filter that left a pair out `filter`; every `file` is relative to `projectRoot`.
+`targets` lists each selected target as `{ name, url }`, with `url` omitted
+for a target without an app address, so a caller can pick one by page
+address. `uncollected` lists every discovered file collection could not read
+(`{ file, reason }`), whatever `--prefix` selected: `--prefix` only keeps a
+failure outside it from failing the call, and `--allow-uncollected` keeps a
+selected file's failure there too.
 
 `import { list } from 'e2e/runner'` returns that selection plus `projectRoot`,
-the pairs a filter removed, positional arguments that matched no file, and the
-selected target names.
+the pairs a filter removed, positional arguments that matched no file, the
+selected target names, their app URLs (`targetApps`), and `uncollected`.
 
 ```bash
 npx e2e list tests/signup.e2e.ts --tag smoke --reporter json

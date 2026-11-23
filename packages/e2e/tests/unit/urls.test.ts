@@ -34,9 +34,15 @@ describe('normalizeBaseUrl', () => {
     expect(() => normalizeBaseUrl('https://example.test/#frag')).toThrow(/fragment/);
   });
 
-  it('rejects plain HTTP for non-loopback hosts', () => {
-    expect(() => normalizeBaseUrl('http://example.test')).toThrow(/loopback/);
+  it('rejects plain HTTP for public hosts and accepts it on private network hosts', () => {
+    expect(() => normalizeBaseUrl('http://example.test')).toThrow(/loopback and private network/);
     expect(normalizeBaseUrl('http://127.0.0.1:8080').origin).toBe('http://127.0.0.1:8080');
+    for (const host of ['10.1.2.3', '172.16.0.9', '172.31.255.254', '192.168.254.150']) {
+      expect(normalizeBaseUrl(`http://${host}:8080/`).origin).toBe(`http://${host}:8080`);
+    }
+    expect(normalizeBaseUrl('http://[fd00::1]:8080').origin).toBe('http://[fd00::1]:8080');
+    expect(() => normalizeBaseUrl('http://172.32.0.1')).toThrow(/loopback and private network/);
+    expect(() => normalizeBaseUrl('http://8.8.8.8')).toThrow(/loopback and private network/);
   });
 
   it('accepts port 0 on a literal loopback address only, where the run picks a free port', () => {
