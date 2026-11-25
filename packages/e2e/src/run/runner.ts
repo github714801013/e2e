@@ -5,7 +5,9 @@ import path from 'node:path';
 import { discoverConfig, loadConfigModule, missingConfigError } from '../config/load.ts';
 import { isCiMode, type ResolvedTarget } from '@e2e-dev/core/lib/config/resolve';
 import { resolveConfig, type ResolvedRunConfig, type RunCliOverrides } from '../config/resolve-run.ts';
-import { collect, collectInMemory, collectSetups, type Collection } from '../collect/collect.ts';
+import { collect, collectInMemory, collectSetups, type Collection, type UncollectedFile } from '../collect/collect.ts';
+import { DynamicRunInput, type PendingSubmission } from './dynamic-input.ts';
+import { DynamicPlan, dynamicAdditions } from './dynamic-plan.ts';
 import type { ModuleRegistration } from '../collect/registry.ts';
 import {
   repeatEach,
@@ -24,6 +26,7 @@ import {
   InfrastructureError,
   E2EError,
   errorMessage,
+  isE2EError,
   exitCodeForCategory,
   serializeError,
   type ErrorPhase,
@@ -151,6 +154,11 @@ export interface RunOptions {
    */
   assertionTimeout?: number | undefined;
   /**
+   * A ceiling on the config's `workers` for one dynamic run (`runDynamic`).
+   * Unlike `workers`, it never raises concurrency above what the project asks.
+   */
+  maxWorkers?: number | undefined;
+  /**
    * Stops the run once this many tests have failed (`--max-failures`): the
    * tests running end as interrupted, the rest are skipped with cause
    * `failure-limit`, and the exit code is the failures' own.
@@ -263,6 +271,8 @@ export interface RunOptions {
    * reporter writes to the terminal past it.
    */
   processOutput?: RunnerOutput | undefined;
+  /** 持续接收同一次 Run 的作业，只供公开动态入口使用。 */
+  dynamicInput?: DynamicRunInput | undefined;
 }
 
 /**
@@ -337,6 +347,24 @@ export interface ListOptions
   config?: string | E2EConfig | undefined;
   /** Target names (`--target`). An unknown name is `UNKNOWN_TARGET`. */
   targets?: readonly string[] | undefined;
+  /**
+   * A literal path prefix (`--prefix`): only discovered files it starts with
+   * are selected, so an unrelated file that fails to collect does not fail
+   * the call.
+   */
+  prefix?: string | undefined;
+  /**
+   * Keep a selected file's collection failure in `uncollected` instead of
+   * failing the call (`--allow-uncollected`), a listing that reports what it
+   * could not read rather than returning nothing.
+   */
+  allowUncollected?: boolean | undefined;
+  /**
+   * Import only the files `files` or `prefix` select (`--imports-named`),
+   * instead of every discovered file. A session a selected test consumes must
+   * then have its setup file named too; collection fails otherwise.
+   */
+  importsNamed?: boolean | undefined;
 }
 
 /**
@@ -372,21 +400,43 @@ export interface ListedPair {
 }
 
 /** The selection `list` returns. */
+/** A selected target and the app address a caller picks it by. */
+export interface ListedTarget {
+  readonly name: string;
+  /** The app's base URL; omitted for a target without one, such as a device app. */
+  readonly url?: string;
+}
+
 export interface ListResult {
+  /**
+   * Absolute path of the project root the config resolved. Every pair's `file`
+   * is relative to it, which differs from `cwd` when the config is found above
+   * a subdirectory the caller started in.
+   */
+  readonly projectRoot: string;
   /** One pair per test, target, and agent, in selection order, filtered pairs included. */
   readonly pairs: readonly ListedPair[];
   /** Positional arguments, as written, that selected no discovered file. */
   readonly unmatched: readonly string[];
   /** Selected target names, in config order. */
   readonly targets: readonly string[];
+  /** Each selected target with its app's base URL, so a caller can pick one by address; never credentials. */
+  readonly targetApps: readonly ListedTarget[];
+  /**
+   * Discovered files the collection could not read, with the reason. Empty
+   * unless a narrowed prefix or `allowUncollected` kept them out of the way.
+   */
+  readonly uncollected: readonly UncollectedFile[];
 }
 
 /**
  * Collects and selects like `e2e list` and stops there: no app process, no
  * engine prepare, no worker. Every pair is returned, filtered ones included,
  * in selection order, one per test, target, and agent; repeats are not
- * expanded. `unmatched` is the positional arguments that selected no file,
- * `targets` the selected target names in config order. An empty selection
+ * expanded. `projectRoot` is where the config resolved and every `file` is
+ * relative to it; `unmatched` is the positional arguments that selected no
+ * file, `targets` the selected target names in config order, `targetApps`
+ * those names with each app's base URL for picking a target by address. An empty selection
  * throws `NO_TESTS` unless `passWithNoTests`. Config, collection, and
  * selection failures throw the same classified error `run` records. Each
  * call imports the test files again, so a later call sees an edit. With
@@ -416,7 +466,14 @@ export async function listSelection(options: ListOptions, notice: (message: stri
   };
   const config = await (processOutput === undefined ? loadConfig() : processOutput.withholdDuring(loadConfig));
   const { changedSince } = runOptions;
-  const collection = await collect(config, runOptions.files);
+  const collection = await collect(
+    config,
+    runOptions.files,
+    undefined,
+    runOptions.prefix,
+    runOptions.allowUncollected === true,
+    options.importsNamed === true,
+  );
   const inputs = await selectionInputs(runOptions, config);
   const first = select(collection, config, inputs.filters, runOptions.passWithNoTests !== undefined ? { passWithNoTests: runOptions.passWithNoTests } : {});
   const selection =
@@ -424,9 +481,15 @@ export async function listSelection(options: ListOptions, notice: (message: stri
       ? first
       : (await filterSelection(first, { config, collection, selectionFilters: inputs.filters, changedSince, signal: new AbortController().signal, notice })).selection;
   return {
+    projectRoot: config.projectRoot,
     pairs: selection.pairs.map((pair) => toListedPair(config.projectRoot, pair)),
     unmatched: collection.unmatchedPositionals,
     targets: selection.perTarget.map((entry) => entry.target.name),
+    targetApps: selection.perTarget.map(({ target }) => ({
+      name: target.name,
+      ...(target.app.base === undefined ? {} : { url: target.app.base.href }),
+    })),
+    uncollected: collection.uncollected,
   };
 }
 
@@ -454,7 +517,7 @@ const FORCE_KILL_MARGIN_MS = 1_000;
 export async function run(options: RunOptions = {}): Promise<RunOutcome> {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
-  const runId = uuidv7();
+  const runId = options.dynamicInput?.runId ?? uuidv7();
   /** The fresh module graph this run's config and test files load in, when `freshGraph` asks for one. */
   const graph = options.freshGraph === true ? `run-${runId}` : undefined;
   /**
@@ -885,6 +948,17 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
       return result;
     };
 
+    const dynamic = options.dynamicInput;
+    const first =
+      dynamic === undefined
+        ? undefined
+        : await withAbort(dynamic.take(), interrupted, () => new InfrastructureError('CANCELLED', 'the dynamic run was interrupted')).catch((cause: unknown) => {
+            // 尚未提交作业时的取消只结束 Run，不算运行故障。
+            if (isE2EError(cause) && cause.code === 'CANCELLED') return undefined;
+            throw cause;
+          });
+    if (dynamic !== undefined && first === undefined) return;
+
     // Collection comes first and starts no process: a collection failure or
     // NO_TESTS is reported before any dev server boots or browser downloads.
     let planned: { collection: Collection; filters: SelectionFilters; selection: Selection };
@@ -893,7 +967,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
         debug.time('collect', async () => {
           const collection =
             options.tests === undefined
-              ? await collect(config, options.files, graph)
+              ? await collect(config, first?.files ?? options.files, graph)
               : collectInMemory(
                   config.projectRoot,
                   options.tests.file,
@@ -914,11 +988,31 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
         }),
       );
     } catch (cause) {
+      first?.reject(cause);
       recordFailure(cause, 'collection');
       return;
     }
     const { collection } = planned;
-    let selection = planned.selection;
+    const dynamicPlan = dynamic === undefined ? undefined : new DynamicPlan(collection.tests);
+    let selection: Selection;
+    try {
+      selection =
+        dynamicPlan === undefined
+          ? planned.selection
+          : dynamicPlan.append(
+              planned.selection,
+              new Set(collection.files.filter((file) => file.selected).map((file) => file.file)),
+            );
+    } catch (cause) {
+      // The first submission never passes through `dynamicAdditions`, so its
+      // rejection has to be settled here; the run then idles out without work.
+      if (first === undefined) throw cause;
+      first.reject(cause);
+      selection = {
+        pairs: [],
+        perTarget: planned.selection.perTarget.map(({ target }) => ({ target, pairs: [] })),
+      };
+    }
     if (!interrupted.aborted) {
       for (const skipped of collection.uncollected) {
         const why = options.tests === undefined ? 'which no positional selected' : 'collected only for its setup tests';
@@ -970,7 +1064,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
 
     // The work units, built once: the same plans tell each engine's `prepare`
     // how many worker slots to provision and the scheduler what to dispatch.
-    let plans = buildWorkPlans(selection, collection, config.projectRoot);
+    let plans = dynamicPlan?.plans(selection, collection, config.projectRoot) ?? buildWorkPlans(selection, collection, config.projectRoot);
     // A run with nothing to run (the filters left nothing, or
     // --pass-with-no-tests on an empty selection) still reports, but
     // prepares no engine and starts no app.
@@ -983,7 +1077,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     // there is none in either case.
     const workerConfigPath = options.tests === undefined ? config.configPath : undefined;
     const inProcess = workerConfigPath === undefined;
-    const runWorkers = inProcess ? 1 : config.workers;
+    const runWorkers = inProcess ? 1 : Math.min(config.workers, options.maxWorkers ?? config.workers);
     // Starting long files early only pays when other workers take the rest, so only such a run reads the timings history.
     const previous = runWorkers > 1 ? await loadTimings(timingsPath(config), outputLayout(config.output).report) : undefined;
     plans = orderWorkPlans(plans, {
@@ -1006,7 +1100,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     if (hasWork) {
       try {
         plans = await debug.time('engine.prepare', () =>
-          prepareEngines(plans, runWorkers, engines, { runId, projectRoot: config.projectRoot, env, signal: interrupted, headed: options.headed ?? false, notice }, emit),
+          prepareEngines(plans, runWorkers, engines, { runId, projectRoot: config.projectRoot, env, signal: interrupted, headed: options.headed ?? false, notice }, emit, dynamic !== undefined),
         );
       } catch (cause) {
         if (!interrupted.aborted) recordFailure(cause, 'launch');
@@ -1142,9 +1236,31 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
       promptLine = line;
     };
     pendingNonRun = [];
-    appExitTargets = await debug.time('scheduler', () =>
+    const append = async (request: PendingSubmission): Promise<readonly TargetWorkPlan[]> => {
+      const stopped = (): boolean => interrupted.aborted || dynamic!.isStopped;
+      if (stopped()) throw new InfrastructureError('CANCELLED', 'the dynamic run was interrupted');
+      const nextCollection = await collect(config, request.files, graph);
+      // 收集中途结束的运行不能再把任务塞进已经停下的调度器。
+      if (stopped()) throw new InfrastructureError('CANCELLED', 'the dynamic run was interrupted');
+      const nextSelection = select(nextCollection, config, { targetIds: targets.map((target) => target.name) });
+      for (const { target, pairs } of nextSelection.perTarget) validateEngine(target, pairs);
+      const submitted = new Set(nextCollection.files.filter((file) => file.selected).map((file) => file.file));
+      const accepted = dynamicPlan!.append(nextSelection, submitted);
+      const additions = dynamicPlan!.plans(accepted, nextCollection, config.projectRoot);
+      const total = dynamicPlan!.selection(selection);
+      emit({ type: 'plan-updated', total: total.pairs.length, files: plannedFiles(total) });
+      dynamicPlan!.accept(request, accepted);
+      return additions;
+    };
+    const stopInput = (): void => dynamic?.stop();
+    interrupted.addEventListener('abort', stopInput, { once: true });
+    if (interrupted.aborted) stopInput();
+    if (first !== undefined) dynamicPlan!.accept(first, selection);
+    try {
+      appExitTargets = await debug.time('scheduler', () =>
       runUnits({
         plans,
+        ...(dynamic === undefined ? {} : { additions: dynamicAdditions(dynamic, append) }),
         workers: runWorkers,
         ...(options.maxFailures === undefined ? {} : { maxFailures: options.maxFailures }),
         ...(timeLimit === undefined ? {} : { timeLimit }),
@@ -1167,8 +1283,9 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
           },
           onRunError: recordRunError,
           onRunAbort: abortRun,
-          onFailureLimit: stopEarly,
+          onFailureLimit: (failures, limit) => { stopInput(); stopEarly(failures, limit); },
           onTimeLimit: () => {
+            stopInput();
             stoppedEarly = true;
           },
           onTestStart: (start, targetName) =>
@@ -1185,6 +1302,10 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
         },
       }),
     );
+    } finally {
+      interrupted.removeEventListener('abort', stopInput);
+      dynamic?.stop();
+    }
   };
 
   // The interrupt bridge is armed for the whole body — app startup, collection,
@@ -1256,6 +1377,7 @@ async function prepareEngines(
   engines: PreparedEngines,
   scope: PrepareScope,
   emit: (fact: RunEventFact) => void,
+  dynamic = false,
 ): Promise<TargetWorkPlan[]> {
   const prepared: TargetWorkPlan[] = [];
   for (const plan of plans) {
@@ -1268,7 +1390,7 @@ async function prepareEngines(
     const step: SetupStep = { kind: 'prepare', target: target.name, engine: engine.name };
     emit({ type: 'setup', step, state: 'started' });
     const startedMs = Date.now();
-    const slots = plannedSlots(plan, runWorkers);
+    const slots = dynamic ? Math.min(runWorkers, target.engine?.workers ?? runWorkers) : plannedSlots(plan, runWorkers);
     const result = await engines.prepare(target, slots, scope);
     prepared.push(withPreparedWorkers(plan, engine.name, slots, result));
     if (!scope.signal.aborted) {
@@ -1322,9 +1444,10 @@ interface SelectionInputs {
 }
 
 /**
- * What `loadRunConfig`, `selectionInputs`, and `validateRunOptions` read.
- * `run` passes `RunOptions`; `list` translates the public bag into these
- * (`config` string to `configPath`, object to `rawConfig`, `targets` to `targetIds`).
+ * What `loadRunConfig`, `selectionInputs`, and `validateRunOptions` read, plus
+ * the `prefix` `listSelection` passes to collection. `run` passes `RunOptions`;
+ * `list` translates the public bag into these (`config` string to `configPath`,
+ * object to `rawConfig`, `targets` to `targetIds`).
  */
 type SelectionRunOptions = Pick<
   RunOptions,
@@ -1346,7 +1469,12 @@ type SelectionRunOptions = Pick<
   | 'maxFailures'
   | 'maxDuration'
   | 'repeatEach'
->;
+> & {
+  /** A literal path prefix, from `list`'s `--prefix`, that narrows collection. */
+  prefix?: string | undefined;
+  /** From `list`'s `--allow-uncollected`: keep a failure out of the way instead of failing. */
+  allowUncollected?: boolean | undefined;
+};
 
 /** The public `list` bag as the options config loading and selection already take. */
 export function toSelectionRunOptions(options: ListOptions): SelectionRunOptions {

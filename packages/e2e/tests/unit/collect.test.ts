@@ -213,6 +213,87 @@ describe('collect', () => {
       rmSync(projectRoot, { recursive: true, force: true });
     }
   });
+
+  it('narrows collection to a literal prefix, or tolerates a failing file on request', async () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), 'e2e-prefix-'));
+    try {
+      for (const [file, source] of Object.entries({
+        'tests/healthy/a.e2e.ts': 'export {};\n',
+        'tests/broken/b.e2e.ts': 'const broken = ;\n',
+      })) {
+        mkdirSync(path.dirname(path.join(projectRoot, file)), { recursive: true });
+        writeFileSync(path.join(projectRoot, file), source);
+      }
+      const config = resolveConfig(
+        { targets: [{ name: 'web', platform: 'web' }], tests: 'tests/**/*.e2e.ts' },
+        { projectRoot, env: {} as NodeJS.ProcessEnv },
+      );
+      await expect(collect(config)).rejects.toThrow(/failed to collect tests\/broken\/b\.e2e\.ts/);
+      const narrowed = await collect(config, [], undefined, 'tests/healthy');
+      expect(narrowed.files.map((file) => file.file)).toEqual(['tests/healthy/a.e2e.ts']);
+      expect(narrowed.uncollected.map((file) => file.file)).toEqual(['tests/broken/b.e2e.ts']);
+      const absolute = await collect(config, [], undefined, path.join(projectRoot, 'tests', 'healthy'));
+      expect(absolute.files.map((file) => file.file)).toEqual(['tests/healthy/a.e2e.ts']);
+      expect(absolute.uncollected.map((file) => file.file)).toEqual(['tests/broken/b.e2e.ts']);
+      await expect(collect(config, [], undefined, 'tests/broken')).rejects.toThrow(/failed to collect tests\/broken\/b\.e2e\.ts/);
+      await expect(collect(config, [], undefined, '')).rejects.toThrow(/failed to collect tests\/broken\/b\.e2e\.ts/);
+      // A listing keeps what it could read, so a caller that reports the rest still gets the list.
+      const tolerated = await collect(config, [], undefined, undefined, true);
+      expect(tolerated.files.map((file) => file.file)).toEqual(['tests/healthy/a.e2e.ts']);
+      expect(tolerated.uncollected.map((file) => file.file)).toEqual(['tests/broken/b.e2e.ts']);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('imports only the named files on request, and every discovered file otherwise', async () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), 'e2e-imports-'));
+    try {
+      mkdirSync(path.join(projectRoot, 'tests', 'healthy'), { recursive: true });
+      mkdirSync(path.join(projectRoot, 'tests', 'broken'), { recursive: true });
+      writeFileSync(path.join(projectRoot, 'tests', 'healthy', 'a.e2e.ts'), 'export {};\n');
+      writeFileSync(path.join(projectRoot, 'tests', 'broken', 'b.e2e.ts'), 'const broken = ;\n');
+      const config = resolveConfig(
+        { targets: [{ name: 'web', platform: 'web' }], tests: 'tests/**/*.e2e.ts' },
+        { projectRoot, env: {} as NodeJS.ProcessEnv },
+      );
+
+      const named = await collect(config, ['tests/healthy/a.e2e.ts'], undefined, undefined, false, true);
+      expect(named.files.map((file) => file.file)).toEqual(['tests/healthy/a.e2e.ts']);
+      // The broken file outside the names is never imported.
+      expect(named.uncollected).toEqual([]);
+      const all = await collect(config, ['tests/healthy/a.e2e.ts'], undefined, undefined, true);
+      expect(all.uncollected.map((file) => file.file)).toEqual(['tests/broken/b.e2e.ts']);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('caps a kept collection failure reason at 8 KiB on a code point boundary', async () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), 'e2e-uncollected-'));
+    try {
+      mkdirSync(path.join(projectRoot, 'tests'), { recursive: true });
+      writeFileSync(path.join(projectRoot, 'tests', 'ascii.e2e.ts'), `throw new Error('E'.repeat(20000));\n`);
+      writeFileSync(path.join(projectRoot, 'tests', 'cjk.e2e.ts'), `throw new Error('错'.repeat(6000));\n`);
+      const config = resolveConfig(
+        { targets: [{ name: 'web', platform: 'web' }], tests: 'tests/**/*.e2e.ts' },
+        { projectRoot, env: {} as NodeJS.ProcessEnv },
+      );
+
+      const kept = await collect(config, [], undefined, undefined, true);
+      const reasons = new Map(kept.uncollected.map((file) => [file.file, file.reason]));
+      const ascii = reasons.get('tests/ascii.e2e.ts') ?? '';
+      const cjk = reasons.get('tests/cjk.e2e.ts') ?? '';
+      expect(ascii.startsWith('EEE')).toBe(true);
+      expect(Buffer.byteLength(ascii, 'utf8')).toBeLessThanOrEqual(8192);
+      // A multi-byte message is cut between characters, never through one.
+      expect(cjk.startsWith('错')).toBe(true);
+      expect(cjk).not.toContain('�');
+      expect(Buffer.byteLength(cjk, 'utf8')).toBeLessThanOrEqual(8192);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('relativeToRoot', () => {

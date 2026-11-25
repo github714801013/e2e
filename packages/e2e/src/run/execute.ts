@@ -3,7 +3,7 @@
 import path from 'node:path';
 import type { TargetSession } from '@e2e-dev/core/lib/engine/surface';
 import { isCiMode, type ResolvedConfig } from '@e2e-dev/core/lib/config/resolve';
-import { classifyError, ConfigurationError, E2EError, serializeError, sanitizeRecordedText, truncateUtf8, TestError, TestTimeoutError, withHint, type SerializedError } from '@e2e-dev/core/lib/internal/errors';
+import { classifyError, ConfigurationError, E2EError, errorMessage, serializeError, sanitizeRecordedText, truncateUtf8, TestError, TestTimeoutError, withHint, type SerializedError } from '@e2e-dev/core/lib/internal/errors';
 import { isRuntimeSkip, type RuntimeSkip } from '../internal/skip.ts';
 import { lateExpectedFailureError } from '@e2e-dev/core/lib/internal/expected-failure';
 import { settleExpectedFailure } from './expected-failure.ts';
@@ -16,7 +16,8 @@ import { createAgentCacheContext, settleStagedTraces } from '@e2e-dev/core/lib/c
 import { storedRecordingsFor, type StoredRecordings } from '@e2e-dev/core/lib/cache/rekeyed';
 import type { ModuleRegistration, RegisteredTest } from '../collect/registry.ts';
 import { pairRecordings, type TestTargetPair } from '../collect/select.ts';
-import type { ArtifactStore } from '@e2e-dev/core/lib/types';
+import type { ArtifactStore, SessionFixtures } from '@e2e-dev/core/lib/types';
+import type { ResolvedTargetSession } from '@e2e-dev/core/lib/config/targets';
 import { attemptSegments, createAttemptArtifacts, resultSegment } from '@e2e-dev/core/lib/run/artifacts';
 import { AttemptBudget } from '@e2e-dev/core/lib/run/budget';
 import { planAttemptFixtures, WorkerFixturePool } from './fixture-pool.ts';
@@ -43,6 +44,7 @@ import { runSerialUnit, type SerialAttemptStart, type SerialHost, type SharedSer
 import { interruptedInPhase, interruptedSkip, pairKey, unitResult, unstartedResult } from './units.ts';
 import { carriedSecrets, processSecrets, redactForSession, sessionLedger, staticSecretLedger } from '@e2e-dev/core/lib/run/secrecy';
 import { SessionStaging } from '@e2e-dev/core/lib/run/sessions';
+import { sharedSessionIdentity, SharedSessionStore } from './shared-sessions.ts';
 import { isOwnStep, StepRecorder, type StepHoldRequest, type StepProgress } from '@e2e-dev/core/lib/run/steps';
 import { holdAttemptSteps, readHeldScreen, type AttemptHolds, type HeldStep, type StepHoldContext } from './step-hold.ts';
 import { WorkerModels } from '@e2e-dev/core/lib/run/worker-models';
@@ -168,6 +170,8 @@ export class TargetExecutor extends EngineSessions implements SerialHost {
   private readonly storedRecordings: StoredRecordings | undefined;
   /** The stored screenshots the run wrote, so no comparison passes against one nobody reviewed. */
   private readonly writtenScreenshots: WrittenScreenshots;
+  /** The target's shared login store, built on the first attempt that needs it. */
+  private sharedSessionStore: SharedSessionStore | undefined;
 
   constructor(protected override readonly options: TargetExecutorOptions) {
     super(options);
@@ -459,6 +463,116 @@ export class TargetExecutor extends EngineSessions implements SerialHost {
         }
       },
     );
+  }
+
+  /**
+   * Restores the target's shared login before the test runs, logging in under
+   * the cross-process lock when the saved state no longer checks out. A
+   * failed check, login, or lock wait stops the run: every other attempt
+   * would meet the same failure, so it is reported once for the run.
+   */
+  private async prepareSharedSession(
+    pair: TestTargetPair,
+    context: AttemptContext,
+    session: TargetSession,
+    fixtures: SessionFixtures,
+    attemptId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const login = this.target.session;
+    if (login === undefined) return;
+    if (context.kind === 'setup') return;
+    // A test that names a saved session, or turns the shared one off, keeps
+    // its own login: it is testing that flow.
+    if (pair.options.session !== undefined || pair.options.sharedSession === false) return;
+    const shared = context.kind === 'serial' ? context.shared : undefined;
+    if (shared?.provisioned === true) return;
+
+    const store = (this.sharedSessionStore ??= new SharedSessionStore(this.config.projectRoot));
+    const identity = sharedSessionIdentity(this.target);
+    const redact = (text: string): string => redactForSession(session, this.config.allSecrets, text);
+    const restoreCached = async (): Promise<boolean> => {
+      const state = await store.load(login.key, identity);
+      if (state === undefined) return false;
+      await this.lifecycle('restoring the shared session', this.config.launchTimeout, 'LAUNCH_TIMEOUT', signal, (launchSignal) =>
+        session.restoreState!(state, this.op(attemptId, this.config.launchTimeout, launchSignal)),
+      );
+      return true;
+    };
+    const check = async (): Promise<boolean> => {
+      try {
+        return await login.check(fixtures, login.credential);
+      } catch (cause) {
+        throw new ConfigurationError(
+          'SESSION_CHECK_FAILED',
+          `the shared login check for target "${this.target.name}" threw: ${errorMessage(cause)}`,
+          { cause },
+        );
+      }
+    };
+    try {
+      if ((await restoreCached()) && (await check())) {
+        if (shared !== undefined) shared.provisioned = true;
+        return;
+      }
+      await store.withLoginLock(login.key, signal, async () => {
+        // Another worker may have logged in while this one waited: a state
+        // that checks out now is used as is, without a second login.
+        if ((await restoreCached()) && (await check())) return;
+        await this.signIn(login, fixtures);
+        const state = await session.captureState!(this.op(attemptId, this.config.actionTimeout, signal));
+        await store.save(login.key, identity, login.account, state);
+      });
+      if (shared !== undefined) shared.provisioned = true;
+    } catch (cause) {
+      const error = classifyError(cause);
+      if (error.code === 'SESSION_CHECK_FAILED' || error.code === 'SESSION_LOGIN_FAILED' || error.code === 'SESSION_LOCK_TIMEOUT') {
+        this.options.events?.onRunAbort?.({ error: serializeError(error, { projectRoot: this.config.projectRoot, redact }) });
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Runs the target's login, retried once, then checks it took: a login that
+   * does not produce a usable session fails the run instead of saving bad
+   * state other runs would restore.
+   */
+  private async signIn(login: ResolvedTargetSession, fixtures: SessionFixtures): Promise<void> {
+    let failed: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await login.login(fixtures, login.credential);
+        failed = undefined;
+        break;
+      } catch (cause) {
+        failed = cause;
+      }
+    }
+    const account = `account "${login.account}" on target "${this.target.name}"`;
+    if (failed !== undefined) {
+      throw new ConfigurationError(
+        'SESSION_LOGIN_FAILED',
+        `the shared login for ${account} failed after 2 attempts: ${errorMessage(failed)}`,
+        { cause: failed },
+      );
+    }
+    let signedIn: boolean;
+    try {
+      signedIn = await login.check(fixtures, login.credential);
+    } catch (cause) {
+      throw new ConfigurationError(
+        'SESSION_LOGIN_FAILED',
+        `the shared login for ${account} did not produce a usable session: ${errorMessage(cause)}`,
+        { cause },
+      );
+    }
+    if (!signedIn) {
+      throw new ConfigurationError(
+        'SESSION_LOGIN_FAILED',
+        `the shared login for ${account} ran, but the session still does not check out`,
+      );
+    }
   }
 
   private async executeAttempt(
@@ -803,6 +917,20 @@ export class TargetExecutor extends EngineSessions implements SerialHost {
       };
       const mainWork = async (): Promise<void> => {
         try {
+          // The shared login restores, checks, and when needed logs in before
+          // any fixture hook runs, inside the test's deadline and signal.
+          // createFixtures defines the engine's contributed fixtures on this
+          // object already; its type only names the core ones, so the hook
+          // surface is wider than the attempt's own fixture type.
+          const sessionFixtures: unknown = builtIns;
+          await this.prepareSharedSession(
+            pair,
+            context,
+            session,
+            sessionFixtures as SessionFixtures,
+            attemptId,
+            attemptAbort.signal,
+          );
           await fixtures.run((next, owner) => {
             enter(next);
             steps.owner = owner;

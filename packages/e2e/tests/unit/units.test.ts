@@ -98,6 +98,7 @@ const defaultOptions: ResolvedTestOptions = {
   serial: false,
   trace: undefined,
   video: undefined,
+  sharedSession: true,
 };
 
 function makePair(test: CollectedTest, overrides: Partial<TestTargetPair> = {}): TestTargetPair {

@@ -96,6 +96,16 @@ type ConfigSource = { readonly file: string } | { readonly engine: EngineSession
 /** What sessions opened with `engine` claim as their config: they hold no secrets, so they share it whatever the engine. */
 const ENGINE_DEFAULTS = 'engine defaults, with no config file';
 
+/** What an open returns: the text a client reads and the target the HTTP gateway counts. */
+interface OpenedSession {
+  /** The opening text: the summary, the catalog, and the first screen. */
+  readonly text: string;
+  readonly target: string;
+  readonly platform: string;
+  /** The target's app URL; a device target has none, and the gateway keys on the target name. */
+  readonly appUrl?: string | undefined;
+}
+
 export interface SessionHostOptions {
   /** The absolute path of the config a session loads, without evaluating it; `configPath` overrides the server's default. */
   readonly locateConfig: (configPath: string | undefined) => string;
@@ -155,10 +165,11 @@ export class SessionHost {
 
   /**
    * Opens a session and returns its opening text: the summary, the catalog,
-   * and the first screen. `signal` is the request's: a client that cancels
-   * it, or disconnects, aborts the open and what it started.
+   * and the first screen, plus the target it landed on, which `open_session`
+   * reports. `signal` is the request's: a client that cancels it, or
+   * disconnects, aborts the open and what it started.
    */
-  open(options: OpenSessionOptions, signal?: AbortSignal): Promise<string> {
+  open(options: OpenSessionOptions, signal?: AbortSignal): Promise<OpenedSession> {
     const headed = options.headed ?? this.options.headed;
     const usage = new SessionUsage(this.sessions.liveCount, headed);
     return this.sessions.admit((id) => this.openSession(id, options, headed, usage, signal)).catch((cause: unknown) => {
@@ -264,7 +275,7 @@ export class SessionHost {
     headed: boolean,
     usage: SessionUsage,
     request: AbortSignal | undefined,
-  ): Promise<string> {
+  ): Promise<OpenedSession> {
     // The catalog renders synchronously, so the optional SDK is loaded once
     // here when installed. Without it the catalog reads the tools' Standard
     // Schemas, and only a model-backed call needs the package.
@@ -392,7 +403,13 @@ export class SessionHost {
       // A step that ends on its own (the TTL, a hard stop) ends the session.
       void step.done.then((ended) => this.endOnItsOwn(live, ended.error === undefined ? 'the session step concluded' : errorMessage(ended.error), 'step'));
       this.touch(live);
-      return text;
+      const base = live.target.app.base?.href;
+      return {
+        text,
+        target: live.target.name,
+        platform: live.target.platform,
+        ...(base === undefined ? {} : { appUrl: base }),
+      };
     } catch (cause) {
       opening.removeEventListener('abort', cancel);
       await this.closeAttempt(attempt, abort, async () => {
@@ -415,7 +432,7 @@ export class SessionHost {
     }
     const needsConfig = Object.entries({ config: options.config, target: options.target, test: options.test }).find(([, value]) => value !== undefined)?.[0];
     if (needsConfig !== undefined) {
-      throw new ConfigurationError('INVALID_ARGUMENT', `open_session: ${needsConfig} names part of a config file, and engine opens a session without one; pass one or the other`);
+      throw new ConfigurationError('INVALID_ARGUMENT', `open_session: ${needsConfig} names part of a config file, and engine opens a session that does not read one; pass one or the other`);
     }
     return { engine: { ...(typeof engine === 'string' ? { package: engine } : engine), ...(app === undefined ? {} : { app }) } };
   }
@@ -513,6 +530,9 @@ export class SessionHost {
     if (config.secrets.size > 0) {
       lines.push(`Secrets: ${[...config.secrets.keys()].map((name) => `"${name}"`).join(', ')}. Fill one into any input with type_secret and its name; you never see the value.`);
     }
+    if ([...config.secrets.keys()].some((name) => name.startsWith(`${live.target.name}.`))) {
+      lines.push(`Secrets whose names start with "${live.target.name}." belong to this target.`);
+    }
     lines.push(
       `Pass session "${live.id}" to every tools, call, and close_session; with several sessions open, a call without it fails.`,
     );
@@ -593,7 +613,7 @@ export class SessionHost {
           ])
           .optional()
           .describe(
-            'Only where the project has no config file: the engine to open a session on, as a config would build it. A package name calls its default export with no options: "@e2e-dev/web". An object passes options, and an option can be another factory call, which is how an engine gets a device or browser provider: {package: "@e2e-dev/mobile", options: {platform: "ios"}}, or {package: "@e2e-dev/mobile", options: {platform: "ios", device: {package: "@e2e-dev/limrun", export: "limrun", options: {region: "eu"}}}} for mobile({platform: "ios", device: limrun({region: "eu"})}). A package not installed fails with the command that installs it. Excludes target, config, and test',
+            'Open the session on this engine instead of the project config file, as a config would build it. A package name calls its default export with no options: "@e2e-dev/web". An object passes options, and an option can be another factory call, which is how an engine gets a device or browser provider: {package: "@e2e-dev/mobile", options: {platform: "ios"}}, or {package: "@e2e-dev/mobile", options: {platform: "ios", device: {package: "@e2e-dev/limrun", export: "limrun", options: {region: "eu"}}}} for mobile({platform: "ios", device: limrun({region: "eu"})}). A package not installed fails with the command that installs it. Excludes target, config, and test',
           ),
         app: z
           .object({
@@ -605,8 +625,23 @@ export class SessionHost {
           .optional()
           .describe('With engine: the app under test, as a target declares it in an e2e.config.ts. @e2e-dev/web needs url; @e2e-dev/mobile needs bundleId or appPath'),
       }).strict(),
+      outputSchema: z.object({
+        target: z.string().describe('The target the session opened'),
+        platform: z.string().describe('The target platform, such as web, ios, or android'),
+        appUrl: z.string().optional().describe("The target's app URL; absent for a device target"),
+      }).strict(),
       readOnly: false,
-      call: async (args, extra) => textResult(await this.open(args, extra.signal)),
+      call: async (args, extra) => {
+        const opened = await this.open(args, extra.signal);
+        return {
+          content: [{ type: 'text', text: opened.text }],
+          structuredContent: {
+            target: opened.target,
+            platform: opened.platform,
+            ...(opened.appUrl === undefined ? {} : { appUrl: opened.appUrl }),
+          },
+        };
+      },
     });
   }
 

@@ -4,7 +4,7 @@
  */
 
 import type { expectationBrand, testCaseBrand } from './internal/brands.ts';
-import type { CredentialConfig, Secret, SecretConfig } from './config/secrets.ts';
+import type { Credential, CredentialConfig, Secret, SecretConfig } from './config/secrets.ts';
 import type { Unique } from './params.ts';
 import type { StepExecutor } from './agent/executor.ts';
 import type { RecordedAction } from './cache/trace.ts';
@@ -742,6 +742,33 @@ export interface SetupFixtures extends TestFixtures {
   readonly session: SetupSession;
 }
 
+/** The fixtures a target's shared login hooks work with. */
+export interface SessionFixtures extends TestFixtures {
+  /**
+   * Fixtures the target's engine contributes, such as `browser` on a web
+   * target, built when the hooks first read them. Untyped here: a config
+   * cannot know its engine's fixture types, so the hooks declare the ones
+   * they use.
+   */
+  readonly [name: string]: unknown;
+}
+
+/**
+ * A login shared by every test on a target, kept across runs: the runner
+ * restores its saved browser or device state before a test, asks `check`
+ * whether it still works, and calls `login` under an exclusive lock when it
+ * does not. The state is keyed by the app's identity and the account, so two
+ * targets for the same app and account share one login.
+ */
+export interface TargetSessionConfig {
+  /** The `credentials` account this session signs in as; its password is never readable. */
+  readonly account: string;
+  /** Signs the app in. The runner serializes concurrent logins for the same app and account. */
+  login(fixtures: SessionFixtures, credential: Credential): Promise<void>;
+  /** Whether the current session is still signed in; `false` makes the test log in again first. */
+  check(fixtures: SessionFixtures, credential: Credential): Promise<boolean>;
+}
+
 export interface TestOptions {
   /** Attempt deadline in milliseconds; defaults to `config.timeout`. Innermost wins. */
   timeout?: number;
@@ -765,6 +792,12 @@ export interface TestOptions {
   requires?: readonly Capability[];
   /** Session a setup test saved, restored before the body runs. */
   session?: string;
+  /**
+   * Whether the target's shared login session is restored for this test.
+   * Defaults to true; `false` leaves the test signed out, for one that tests
+   * the login flow itself. A test naming `session` never uses the shared one.
+   */
+  sharedSession?: boolean;
   /** Extra context for agent steps; layers are concatenated outermost first. */
   agentContext?: string;
   /**
@@ -796,7 +829,7 @@ export interface DescribeOptions extends Omit<TestOptions, 'only' | 'fail'> {
   serial?: boolean;
 }
 
-export interface SetupOptions extends Omit<TestOptions, 'session' | 'only' | 'skip' | 'fail' | 'agent'> {
+export interface SetupOptions extends Omit<TestOptions, 'session' | 'only' | 'skip' | 'fail' | 'agent' | 'sharedSession'> {
   /** Session names this setup test MUST save. */
   sessions: readonly string[];
   /** A setup test runs once per target, so it pins at most one agent. */
@@ -1350,7 +1383,8 @@ export interface TargetApp {
    * Base URL of an addressable app: `app.open()` opens it and relative
    * navigation resolves against it. WHATWG-normalized; no userinfo, query, or
    * fragment; a missing scheme becomes `https://`, or `http://` for a
-   * loopback host. Plain HTTP is accepted for loopback hosts only. A URL on
+   * loopback host. Plain HTTP is accepted for loopback and private network
+   * hosts only. A URL on
    * `127.0.0.1` or `[::1]` with port 0 asks the run for a free port for
    * `command`, handed to it as `{port}`; without a command nothing would
    * serve it, so that is `INVALID_CONFIG`.
@@ -1442,6 +1476,12 @@ export interface Target {
   engine?: EngineHandle;
   /** The app under test: what it is, where it is served, and the command that starts it. */
   app?: TargetApp;
+  /**
+   * A login shared by every test on this target, kept across runs. The app
+   * must declare a URL, and the engine must support state capture and
+   * restore; both are checked at config load.
+   */
+  session?: TargetSessionConfig;
   /**
    * Which attempts on this target keep a trace, in place of the config's
    * `trace`; `--trace` and a test's own `trace` win over it.

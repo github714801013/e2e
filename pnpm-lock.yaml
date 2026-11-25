@@ -551,6 +551,9 @@ importers:
       '@jridgewell/remapping':
         specifier: 2.3.5
         version: 2.3.5
+      '@modelcontextprotocol/client':
+        specifier: 2.4.0
+        version: 2.4.0
       '@modelcontextprotocol/server':
         specifier: 2.4.0
         version: 2.4.0
@@ -606,9 +609,6 @@ importers:
       '@e2e-dev/web':
         specifier: workspace:*
         version: link:../web
-      '@modelcontextprotocol/client':
-        specifier: 2.4.0
-        version: 2.4.0
       '@napi-rs/image':
         specifier: 1.16.0
         version: 1.16.0

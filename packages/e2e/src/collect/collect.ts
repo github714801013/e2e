@@ -3,7 +3,7 @@
 import { realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { compileGlob, compileGlobList, discoverFiles, GLOB_SYNTAX, literalPrefix, matchesGlob } from '@e2e-dev/core/lib/internal/globs';
-import { CollectionError, isE2EError } from '@e2e-dev/core/lib/internal/errors';
+import { CollectionError, isE2EError, truncateUtf8 } from '@e2e-dev/core/lib/internal/errors';
 import { setupTestId, testId } from '@e2e-dev/core/lib/internal/ids';
 import { explainModuleError } from '../config/diagnose.ts';
 import { importModule } from '../config/load.ts';
@@ -20,6 +20,9 @@ import {
 } from './registry.ts';
 import type { SourceLocation } from '@e2e-dev/core/lib/internal/source';
 import type { TestIdentity } from '@e2e-dev/core/lib/run/records';
+
+/** A reason enters `e2e list --reporter json`, so one huge module error cannot bloat every listing. */
+const MAX_UNCOLLECTED_REASON_BYTES = 8192;
 
 export interface CollectedTest extends RegisteredTest, TestIdentity {
   /** Outermost serial group, when the test is a serial-group member. */
@@ -442,8 +445,33 @@ export function collectInMemory(
  */
 export async function collectSetups(config: ResolvedConfig): Promise<Collection> {
   const discovered = discoverFiles(config.projectRoot, config.tests);
-  const { files, uncollected } = await collectFiles(config, discovered, () => false, true, new Map(), undefined);
+  const { files, uncollected } = await collectFiles(config, discovered, () => false, true, false, new Map(), undefined);
   return { files, tests: files.flatMap((entry) => entry.tests), nearMisses: [], unmatchedPositionals: [], uncollected };
+}
+
+/**
+ * A literal prefix as a project-root-relative path discovered files can be
+ * compared against. A prefix that is absolute or needs path normalization is
+ * resolved only when it stays inside the root, so the narrowed collection
+ * selects exactly the files a `startsWith` over discovered paths would.
+ */
+function collectionPrefix(projectRoot: string, prefix: string): string {
+  const normalized = prefix.replaceAll('\\', '/').replace(/^\.\//, '');
+  if (normalized === '') return '';
+  const trailingSlash = normalized.endsWith('/');
+  const body = trailingSlash ? normalized.slice(0, -1) : normalized;
+  const absolute = path.isAbsolute(body);
+  // A relative prefix with `.` or `..` stays literal; an absolute one is a
+  // resolved path, whose POSIX form starts with the root separator.
+  const segments = body.split('/');
+  if (!absolute && segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return normalized;
+  let relative: string;
+  try {
+    relative = relativeToRoot(projectRoot, absolute ? path.normalize(body) : path.resolve(projectRoot, body));
+  } catch {
+    return normalized;
+  }
+  return trailingSlash ? `${relative}/` : relative;
 }
 
 /**
@@ -452,20 +480,43 @@ export async function collectSetups(config: ResolvedConfig): Promise<Collection>
  * positional arguments selected. Every discovered file is imported even when
  * positionals name a few, because selection needs the whole picture: the
  * setup test a selected test's session depends on may live in a file no
- * positional named. A collection error in a selected file, or anywhere in an
+ * positional named; `importSelectedOnly` opts out, and then the caller names
+ * that setup file too. A collection error in a selected file, or anywhere in an
  * unnarrowed run, fails the run; one in a file positionals left out is kept
  * in `uncollected`, so a half-written file elsewhere in the suite does not
- * stop `e2e run tests/one.e2e.ts`.
+ * stop `e2e run tests/one.e2e.ts`. `prefix` narrows the same way for a caller
+ * naming a literal path prefix, such as `e2e list --prefix`. `allowUncollected`
+ * keeps a selected file's failure in `uncollected` too, for a caller that
+ * lists rather than runs. `importSelectedOnly` imports just the files the
+ * positionals or prefix select (`e2e list --imports-named`), so a listing
+ * that names its files pays only for them; a caller must then name any setup
+ * file a selected test's session needs.
  */
 export async function collect(
   config: ResolvedConfig,
   positionals: readonly string[] = [],
   graph?: string,
+  prefix?: string,
+  allowUncollected = false,
+  importSelectedOnly = false,
 ): Promise<Collection> {
   const discovered = discoverFiles(config.projectRoot, config.tests);
-  const { files: selectedFiles, unmatched, lines } = selectPositionals(config.projectRoot, discovered, positionals);
+  const { files: positionalFiles, unmatched, lines } = selectPositionals(config.projectRoot, discovered, positionals);
+  const narrowedTo = prefix === undefined ? undefined : collectionPrefix(config.projectRoot, prefix);
+  const selectedFiles = narrowedTo === undefined ? positionalFiles : positionalFiles.filter((file) => file.startsWith(narrowedTo));
   const selected = new Set(selectedFiles);
-  const { files, uncollected } = await collectFiles(config, discovered, (file) => selected.has(file), positionals.length > 0, lines, graph);
+  const importable = importSelectedOnly && selectedFiles.length > 0 ? selectedFiles : discovered;
+  const { files, uncollected } = await collectFiles(
+    config,
+    importable,
+    (file) => selected.has(file),
+    // An empty prefix selects every discovered file, so a failure in any of
+    // them still fails the list unless the caller allows it.
+    positionals.length > 0 || (narrowedTo !== undefined && narrowedTo !== ''),
+    allowUncollected,
+    lines,
+    graph,
+  );
   return {
     files,
     tests: files.flatMap((file) => file.tests),
@@ -485,13 +536,15 @@ function isCollectionError(cause: unknown): cause is Error {
  * project files it imports evaluated afresh in `graph` when one is named,
  * shared by every file of the run. A collection error in a selected file,
  * or in any file of a run nothing narrowed, throws; one in a file a
- * narrowed run left unselected is kept in `uncollected`.
+ * narrowed run left unselected, or in any file when `allowUncollected` is
+ * set, is kept in `uncollected`.
  */
 async function collectFiles(
   config: ResolvedConfig,
   discovered: readonly string[],
   isSelected: (file: string) => boolean,
   narrowed: boolean,
+  allowUncollected: boolean,
   lines: ReadonlyMap<string, readonly number[]>,
   graph: string | undefined,
 ): Promise<{ files: CollectedFile[]; uncollected: UncollectedFile[] }> {
@@ -500,13 +553,13 @@ async function collectFiles(
   const { redact } = staticSecretLedger(config.allSecrets);
   for (const file of discovered) {
     const absolutePath = path.join(config.projectRoot, file);
-    const skippable = narrowed && !isSelected(file);
+    const skippable = allowUncollected || (narrowed && !isSelected(file));
     let registration: ModuleRegistration;
     try {
       registration = await collectModule(() => importModule(absolutePath, 'collect', graph), absolutePath, redact);
     } catch (cause) {
       if (skippable) {
-        uncollected.push({ file, reason: isCollectionError(cause) ? cause.message : explainModuleError(cause, absolutePath) });
+        uncollected.push({ file, reason: truncateUtf8(isCollectionError(cause) ? cause.message : explainModuleError(cause, absolutePath), MAX_UNCOLLECTED_REASON_BYTES) });
         continue;
       }
       // A registration error names the option but not the module it came from.
@@ -520,7 +573,7 @@ async function collectFiles(
       files.push(collectFromRegistration(config.projectRoot, absolutePath, registration, isSelected(file), lines.get(file)));
     } catch (cause) {
       if (!skippable || !isCollectionError(cause)) throw cause;
-      uncollected.push({ file, reason: cause.message });
+      uncollected.push({ file, reason: truncateUtf8(cause.message, MAX_UNCOLLECTED_REASON_BYTES) });
     }
   }
   return { files, uncollected };

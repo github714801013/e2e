@@ -10,6 +10,7 @@ screen where it failed.
 ## Contents
 
 - Setup
+- HTTP mode
 - Tools
 - Workflow
 - Fixing a failing test
@@ -80,7 +81,103 @@ Flags: `--config <path>` names the default config file, `--target <name>`
 fixes the target every session opens on, `--headed` shows the browser or
 simulator when the engine supports it in sessions that do not set `headed`
 (sessions are headless by default, as in `e2e run`), `--max-sessions <n>`
-sets how many sessions may be open at once (default 4, 1 through 16; one on Bun).
+sets how many native sessions may be open at once over stdio (default 4, 1
+through 16; one on Bun). With `--http` it is refused: use `--max-sessions-per-domain <n>`
+(default 20, 1 through 100), the sessions one principal may hold on one
+target domain.
+
+## HTTP mode
+
+For clients that connect over a socket instead of launching `e2e mcp`, serve
+Streamable HTTP with a Bearer token list:
+
+```bash
+E2E_HTTP_MCP_TOKENS='[{"token":"<at least 32 characters>","principal":"alice"}]' npx e2e mcp --http --port 3001
+```
+
+Clients connect to `http://127.0.0.1:3001/mcp/e2e` with
+`Authorization: Bearer <token>`. The four tools and the guide resources are
+the same as over stdio. Each MCP session gets its own browser and its own
+stdio child, so two clients of the same principal still see separate pages;
+a session id works only with the token that opened it; an `initialize` that
+carries an id the gateway no longer knows reopens the session under that id,
+while any other request with an unknown id is `404`. The child opens at
+most one native session. There is no global session cap: a session that opens
+a target counts against its principal's `--max-sessions-per-domain` quota for
+that target's app URL host (or the target name for a device), and opening
+past the limit closes the group's least recently active session.
+A token entry may limit `tools`; it also gains three script tools over HTTP:
+`list_test_scripts` (search the project's tests: the required `keyword`
+picks the files whose source contains it, only those and any file that may
+declare a setup test are collected, and they come back grouped by file and
+ordered by BM25 relevance; a file whose
+collection fails is named under `uncollected` instead of failing the call,
+`prefix` narrows the scan, and the result carries `targets: [{ name, url, description?, enabled? }]`
+for picking a target by page address), `get_test_script`,
+and `save_test_script` (atomic, at most 256 KiB; creates missing parent
+directories; runs a collection on the candidate and refuses content that does
+not collect, keeping the old file).
+Paths stay under `--test-root` (default the working directory) and must name
+`.e2e.ts` files.
+`list_test_scripts` and `get_test_script` are in the default set;
+`save_test_script` must be named. A failure outside one file's collection
+reports the exit status only: the child's stderr is project output and is
+never returned. Four job tools, also granted by name, run
+files asynchronously: `run_test` queues one to fifty project-relative test
+files on a target and returns a `jobId` at once, `get_test_status` reports
+its state and counts, `get_test_report` returns the per-test results and
+bounded failure evidence, and `list_test_artifacts` lists what a finished job
+kept, with an authenticated `downloadUrl` for each local file (poll it while
+`ready` is false, since the copy lands after the run ends). A job belongs to
+the submitting principal, so a token granted a job tool must name one, and
+outlives the connection that queued it. That check only gates reading: every job on one target shares the
+run, its authentication, and the capacity limits below. It is not a tenant
+boundary: project code runs as the gateway's user and can read its
+environment, so clients that do not trust each other need separate users,
+projects, and gateways. Submissions for one
+target join its current run, whose authentication setup runs once; a repeated
+file gets its own result. Workers grow only for queued work and never past
+`--max-workers` (default 4, 1 to 64), even when the project asks for more.
+`--max-runs` (default 2, 1 to 16) bounds concurrent runs, and one run holds at
+most 20 unfinished jobs; past either limit `run_test` returns
+`CAPACITY_EXCEEDED`. A run still busy after thirty minutes ends its remaining
+jobs `timed_out` with `RUN_TIMEOUT`; a job that times out while collecting
+stops the shared run, so its neighbours do not wait for it. A submission that
+arrives after a run sealed waits for its child to exit before starting the
+next run, so one target never runs two logins. A run-level hook failure such
+as a failing `afterAll` also fails jobs that already reported `passed`. A
+Runner that crashes or loses its IPC channel marks its unfinished jobs
+`infrastructure_error`; a gateway restart marks them `interrupted`. Neither
+replays a test. Finished job records stay readable for 14 days, and before a
+stopped run's output directory is removed its artifacts are copied to
+`.e2e/http-jobs/artifacts/<jobId>/` with an index beside them (at most 256 MiB
+per file and 1 GiB per job; a larger file is skipped and listed with its
+reason). `list_test_artifacts` returns at most 200 descriptors and sets
+`truncated` past that; a file past the first 200 has no listing entry. Once
+`ready` is true the listing is final, with `error` naming why nothing was kept.
+Each `downloadUrl` is a `GET` on the same gateway with
+the same Bearer token, which must carry `list_test_artifacts`; another
+principal's job and an unknown one both answer `404`. Run one gateway per
+project. Host and Origin are checked against
+loopback by default; `--allow-host`, `--allow-origin`, `--max-body`, and
+`--session-ttl` adjust that boundary. `GET /healthz` reports status and
+session count without a token, and `--path /healthz` is refused at startup.
+
+An account pool can sit over the project's targets. Set
+`E2E_HTTP_MCP_ACCOUNTS_DIR` (default `.e2e/accounts`) and
+`E2E_TARGETS_BASE_FILE` (default `.e2e/targets.json`); an account is one target
+plus a description, and `open_session` and `run_test` take
+`accountDescription` in place of a target, matching when every word is in
+exactly one enabled account's description. `list_test_scripts` lists pooled
+accounts beside configured targets with their `description` and `enabled`.
+Passwords live only in the gateway's `secrets.env` and the child environment;
+the runtime file the child receives through `E2E_TARGETS_FILE` holds
+`{{E2E_ACCOUNT_<NAME>_PASSWORD}}` placeholders, and the base targets file stays
+read-only ahead of the accounts. Both a session child and a run child receive
+them. `E2E_HTTP_MCP_ADMIN_TOKEN` (at least 32
+characters) unlocks `/admin` and `/admin/api/accounts` for adding, describing,
+disabling, re-passwording, and deleting accounts; unset, both paths answer
+`404`. Each account keeps its own shared login.
 
 ## Tools
 
@@ -92,7 +189,7 @@ tool with the same name, use the `e2e` server's.
 
 | Tool | Does |
 | --- | --- |
-| `open_session` | Loads the config (`config` names another file; default the nearest `e2e.config.ts`), starts the declared app command if any, boots the engine, opens the app (its URL, or launches a device's pinned app; it installs no build, so a local device needs `app.bundleId`), and returns the session id, the catalog, and the first observation. Its summary names the app URL, a port assigned for `:0`, and the app command's readiness URL and `env` names; e2e starts nothing else, so a database the app uses runs outside it. The config reads the MCP server's environment, not your shell's. `target` is required when the config declares several. `headed: true` shows the browser or simulator when the user wants to watch; without it the session follows the server's `--headed`, headless by default. `test` runs one test first and leaves the session on the screen where it stopped (see Fixing a failing test). In a directory with no config, `engine` names the engine to open on, as a package name or `{package, export?, options?}`, with `app` for the app under test (Setup); it excludes `target`, `config`, and `test`. Each session has its own browser or device. |
+| `open_session` | Loads the config (`config` names another file; default the nearest `e2e.config.ts`), starts the declared app command if any, boots the engine, opens the app (its URL, or launches a device's pinned app; it installs no build, so a local device needs `app.bundleId`), and returns the session id, the catalog, and the first observation. Its summary names the app URL, a port assigned for `:0`, and the app command's readiness URL and `env` names; e2e starts nothing else, so a database the app uses runs outside it. The config reads the MCP server's environment, not your shell's. `target` is required when the config declares several. `headed: true` shows the browser or simulator when the user wants to watch; without it the session follows the server's `--headed`, headless by default. `test` runs one test first and leaves the session on the screen where it stopped (see Fixing a failing test). `engine` opens the session on that engine instead of the config file — in a directory with no config it is required — as a package name or `{package, export?, options?}`, with `app` for the app under test (Setup); a config file the directory has is not read, and it excludes `target`, `config`, and `test`. Each session has its own browser or device. |
 | `tools` | The catalog: one line per tool with its argument names (`?` marks optional), the first sentence of its description, and `[read-only]` where it changes nothing. `tools {tool}` shows the full description and the JSON Schema of its arguments. |
 | `call` | Runs one catalog tool: `call {tool: "tap", args: {target: "n42"}}`. Arguments are checked against the tool's schema first; a wrong one fails with `INVALID_ARGUMENT` naming the field. |
 | `close_session` | Saves a recording still running, ends the attempt, disposes the engine, stops the app processes the session started once no other session uses them. |
@@ -126,6 +223,10 @@ result's `isError: true`; treat them as failed calls.
 `writing-tests`). Before the session's first `screenshot`, a point tool
 (`tap_at`, `hover_at`, `drag_at`, `type_at`, `press_at`, `select_at`) only
 says to take one.
+
+A secret whose name starts with `<target>.` belongs to that target; the
+session's opening text names the target it is on, so use the prefix that
+matches it when several targets are configured.
 
 Resources: `e2e://guide` and `e2e://guide/<topic>` hold this skill.
 
@@ -326,8 +427,8 @@ session runs the test and stops where it failed:
   `UNKNOWN_TARGET`: no target of that name; the message lists the declared
   ones. `NO_SESSION`: call `open_session` first, or the session named has
   ended (the message says why). `SESSION_REQUIRED`: several sessions are open;
-  pass `session`. `SESSION_OPEN`: every session slot is taken (close one, or
-  raise `--max-sessions`). `CONFIG_IN_USE`: open sessions use another config,
+  pass `session`. `SESSION_OPEN`: every stdio session slot is taken (close
+  one, or raise `--max-sessions`). `CONFIG_IN_USE`: open sessions use another config,
   or were opened with `engine` and this one names a config; open the same
   way, or close them first. `ENGINE_NOT_INSTALLED`: run the install command
   the message names, or ask the user to when you cannot, then `open_session` again. `ENGINE_IN_USE`: the target's engine

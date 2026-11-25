@@ -14,7 +14,8 @@ import { packageVersion } from '@e2e-dev/core/lib/internal/package-version';
 import { MAX_TIMER_MS } from '@e2e-dev/core/lib/internal/time';
 import { classifyError, codedMessage, exitCodeForCategory } from '@e2e-dev/core/lib/internal/errors';
 import type { Shard, TagMode } from '../collect/select.ts';
-import { listSelection, run, type ListedPair, type RunOptions, type RunOutcome } from '../run/runner.ts';
+import { listSelection, run, type ListedPair, type ListedTarget, type RunOptions, type RunOutcome } from '../run/runner.ts';
+import type { UncollectedFile } from '../collect/collect.ts';
 import { claimRunnerOutput } from './run-output.ts';
 import { writeTerminal } from '../run/process-output.ts';
 import { STEP_BOUNDS, TIMEOUT_BOUNDS } from '../explore/bounds.ts';
@@ -36,6 +37,7 @@ import { ERROR_CODE_LIMIT, feedback, FEEDBACK_LIMITS, FEEDBACK_TYPES, type Feedb
 import { guide } from './guide.ts';
 import { addInitOptions, checkInitFlags, type InitFlagValues } from './init/flags.ts';
 import { parseList, parseNames } from './parse-names.ts';
+import { DEFAULT_MAX_RUNS, DEFAULT_MAX_WORKERS, SESSION_PER_DOMAIN_BOUNDS } from '../mcp/http/config.ts';
 import { SESSION_BOUNDS } from '../mcp/bounds.ts';
 import { PROVIDER_NAMES } from '../oauth/provider-ids.ts';
 import type { LoginFlags } from '../oauth/cli.ts';
@@ -630,7 +632,7 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
     .command('mcp')
     .summary('serve the project to a coding agent over MCP')
     .description(
-      'Serve an MCP server over stdio for a coding agent such as Claude Code or Cursor: open_session opens a live session on one target of any config the agent names, call runs the session\'s tools (observe, tap, type, press, select, scroll, navigate, type_secret, locate, test_lines, screenshot, and the project\'s own), tools describes them, close_session ends it. Each action prints the test line that repeats it, so the agent writes a test while it walks the real app. Register it with the client, e.g. claude mcp add --scope project e2e -- npx e2e mcp.',
+      'Serve an MCP server for a coding agent such as Claude Code or Cursor: open_session opens a live session on one target of any config the agent names, call runs the session\'s tools (observe, tap, type, press, select, scroll, navigate, type_secret, locate, test_lines, screenshot, and the project\'s own), tools describes them, close_session ends it. Each action prints the test line that repeats it, so the agent writes a test while it walks the real app. Register it over stdio with the client, e.g. claude mcp add --scope project e2e -- npx e2e mcp; --http serves Streamable HTTP for clients that connect over a socket.',
     )
     .option('--config <path>', 'config file (default: the nearest e2e.config.ts, .mts, .js, or .mjs)')
     .option('--target <name>', 'target every session opens on (default: the only target, or the one open_session names)')
@@ -640,19 +642,68 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
     .addOption(new Option('--headless').hideHelp())
     .option(
       '--max-sessions <n>',
-      `sessions open at once, each with its own browser or device, ${SESSION_BOUNDS.min} through ${SESSION_BOUNDS.max} (default: ${SESSION_BOUNDS.default}; 1 on Bun)`,
+      `native sessions served at once over stdio, each with its own browser or device, ${SESSION_BOUNDS.min} through ${SESSION_BOUNDS.max} (default: ${SESSION_BOUNDS.default}; 1 on Bun); with --http use --max-sessions-per-domain`,
       parseBoundedInt(SESSION_BOUNDS),
     )
+    .option(
+      '--max-sessions-per-domain <n>',
+      `sessions one principal may hold on one target domain with --http, ${SESSION_PER_DOMAIN_BOUNDS.min} through ${SESSION_PER_DOMAIN_BOUNDS.max} (default: ${SESSION_PER_DOMAIN_BOUNDS.default}); a new one reclaims the least recently active`,
+      parseBoundedInt(SESSION_PER_DOMAIN_BOUNDS),
+    )
+    .option('--http', 'serve Streamable HTTP instead of stdio, one MCP session per authenticated client')
+    .option('--host <host>', 'HTTP interface to bind (default: 127.0.0.1; only with --http)')
+    .option('--port <port>', 'HTTP port, 0 for a free one (default: 3001; only with --http)', parseBoundedInt({ min: 0, max: 65535 }))
+    .option('--path <path>', 'HTTP MCP endpoint (default: /mcp/e2e; only with --http)')
+    .option('--allow-host <host>', 'Host header to accept, comma-separated or repeated (default: the loopback names for the bound port)', parseNames('host'))
+    .option('--allow-origin <origin>', 'Origin to accept, comma-separated or repeated (default: the loopback origins for the bound port)', parseNames('origin'))
+    .option('--trusted-proxy <address>', 'proxy address whose X-Forwarded-For is believed, comma-separated or repeated', parseNames('proxy address'))
+    .option('--session-ttl <seconds>', 'close an idle HTTP session after this long, 0 to disable (default: 600)', parseBoundedInt({ min: 0, max: 86_400 }))
+    .option('--max-body <bytes>', 'largest accepted HTTP request body (default: 4194304)', parseBoundedInt({ min: 1024, max: 67_108_864 }))
+    .option(
+      '--max-workers <n>',
+      `workers one HTTP job run may start, capping the project's workers (default: ${DEFAULT_MAX_WORKERS}; only with --http)`,
+      parseBoundedInt({ min: 1, max: 64 }),
+    )
+    .option(
+      '--max-runs <n>',
+      `test runs the HTTP gateway serves at once (default: ${DEFAULT_MAX_RUNS}; only with --http)`,
+      parseBoundedInt({ min: 1, max: 16 }),
+    )
+    .option('--test-root <path>', 'directory the script tools list, read, and save under (default: the current directory; only with --http)')
     .addHelpText(
       'after',
       [
         '',
-        examples(['e2e mcp', 'e2e mcp --target web --headed', 'e2e mcp --max-sessions 8', 'claude mcp add --scope project e2e -- npx e2e mcp']),
+        examples([
+          'e2e mcp',
+          'e2e mcp --target web --headed',
+          'e2e mcp --max-sessions 8',
+          'e2e mcp --http --port 3001',
+          'claude mcp add --scope project e2e -- npx e2e mcp',
+        ]),
         '',
         docsLine('/reference/mcp'),
       ].join('\n'),
     )
-    .action(async (options: { config?: string; target?: string; headed?: boolean; maxSessions?: number }) => {
+    .action(async (options: {
+      config?: string;
+      target?: string;
+      headed?: boolean;
+      maxSessions?: number;
+      maxSessionsPerDomain?: number;
+      http?: boolean;
+      host?: string;
+      port?: number;
+      path?: string;
+      allowHost?: string[];
+      allowOrigin?: string[];
+      trustedProxy?: string[];
+      sessionTtl?: number;
+      maxBody?: number;
+      maxWorkers?: number;
+      maxRuns?: number;
+      testRoot?: string;
+    }) => {
       const { mcp } = await import('./mcp.ts');
       process.exitCode = await mcp(version, options, telemetry);
     });
@@ -983,11 +1034,23 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
     .argument('[files...]', FILES_DESCRIPTION)
     .optionsGroup('Selection:')
     .option('--config <path>', 'config file (default: the nearest e2e.config.ts, .mts, .js, or .mjs)')
-    .option('--target <ids>', 'target names, comma-separated or repeated (default: all targets)', parseNames('target'));
+    .option('--target <ids>', 'target names, comma-separated or repeated (default: all targets)', parseNames('target'))
+    .option(
+      '--prefix <prefix>',
+      'only discovered files under this literal path prefix, relative to the project root or absolute inside it; an unrelated file that fails to collect no longer fails the list',
+    )
+    .option(
+      '--allow-uncollected',
+      'a selected file that fails to collect is reported under uncollected in --reporter json instead of failing the list',
+    )
+    .option(
+      '--imports-named',
+      'import only the files the positionals or --prefix select, not every discovered file; name a setup file a selected test needs',
+    );
   selectionOptions(listCommand)
     .optionsGroup('Output:')
     .addOption(
-      new Option('--reporter <id>', 'list prints one line per pair; json prints { pairs: [...] }; a pair a test filter left out has filter and reason')
+      new Option('--reporter <id>', 'list prints one line per pair; json prints { projectRoot, pairs: [...], targets: [{ name, url }] }; a pair a test filter left out has filter and reason')
         .choices(LIST_REPORTERS)
         .default('list'),
     )
@@ -1014,6 +1077,9 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
         options: SelectionFlagValues & {
           config?: string;
           target?: string[];
+          prefix?: string;
+          allowUncollected?: boolean;
+          importsNamed?: boolean;
           reporter: ListReporter;
         },
         command: Command,
@@ -1023,12 +1089,18 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
         const output = claimRunnerOutput();
         if (options.reporter === 'json') output.keepStdoutForReport();
         let pairs: readonly ListedPair[];
+        let projectRoot: string;
+        let targetApps: readonly ListedTarget[];
+        let uncollected: readonly UncollectedFile[];
         try {
-          ({ pairs } = await listSelection(
+          ({ pairs, projectRoot, targetApps, uncollected } = await listSelection(
             {
               files,
               config: options.config,
               targets: options.target,
+              prefix: options.prefix,
+              allowUncollected: options.allowUncollected,
+              importsNamed: options.importsNamed,
               ...selectionRunOptions(options),
             },
             (message) => process.stderr.write(`${bounded(message)}\n`),
@@ -1042,7 +1114,7 @@ function createProgram(version: string, telemetry: Telemetry, updateCheck: Updat
         output.end();
         // `list` includes pairs a selection flag removed. The command prints the ones that run or are skipped, and those a test filter left out.
         const listed = pairs.filter((pair) => pair.disposition === 'run' || pair.disposition === 'skip' || pair.filter !== undefined);
-        if (options.reporter === 'json') writeTerminal('stdout', `${JSON.stringify({ pairs: listed }, null, 2)}\n`);
+        if (options.reporter === 'json') writeTerminal('stdout', `${JSON.stringify({ projectRoot, pairs: listed, targets: targetApps, uncollected }, null, 2)}\n`);
         else process.stdout.write(listed.map((pair) => `${formatListedPair(pair)}\n`).join(''));
         process.exitCode = 0;
       },

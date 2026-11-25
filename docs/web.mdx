@@ -19,7 +19,7 @@ app: { url: process.env.APP_URL ?? 'http://localhost:3000' },
 ```
 
 A URL without a scheme uses HTTPS, or HTTP for a loopback host. Plain HTTP
-works only on a loopback host.
+works only on a loopback or private network host.
 
 ### Let the runner start it
 
